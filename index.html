@@ -1,0 +1,253 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>highfleetjs shipbuilder</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    /* The blueprint (BLUEPRINT.paper) is the sheet; the chrome around it is a dark desk it's laid on. */
+    --sheet: #184a85; --panel: #0e2849; --panel-2: #0b203d; --edge: #04101f;
+    --ink: #ecf4ff; --ink-dim: #ecf4ff99; --line: #ecf4ff2b; --hover: #ecf4ff14;
+    --warn: #ff9d8f; --gold: #ffd76a;
+    --rule: #ecf4ff17; --margin-rule: #ff9d8f70;   /* the parts list's ruled paper (RULED.line, RULED.margin) */
+    --grain: none; --blotches: none;   /* paper texture tiles, set by app.js */
+  }
+  * { box-sizing: border-box; scrollbar-color: #ecf4ff40 transparent; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr);
+    background: var(--panel); color: var(--ink);
+    font: 13px/1.3 ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace; overflow: hidden;
+  }
+  /* The chrome is paper too: the canvas' grain and blotches, fixed so they run on across the panels. */
+  header, aside, footer {
+    background-color: var(--panel);
+    background-image: var(--grain), var(--blotches); background-size: 512px, 1536px; background-attachment: fixed;
+  }
+
+  /* ---- controls ---- */
+  input, select, button { font: inherit; color: var(--ink); }
+  button, .button, select {
+    background: transparent; border: 1px solid var(--line); border-radius: 3px; padding: 3px 10px; cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover, .button:hover, select:hover { background: var(--hover); border-color: var(--ink-dim); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button:disabled:hover { background: transparent; border-color: var(--line); }
+  select { appearance: none; padding-right: 22px; background: no-repeat right 7px center / 8px
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5'%3E%3Cpath d='M0 0h8L4 5z' fill='%23fff'/%3E%3C/svg%3E"); }
+  select option { background: var(--panel-2); }
+  input[type=text] {
+    background: #00000024; border: 1px solid var(--line); border-radius: 3px; padding: 3px 7px; width: 20ch;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--ink-dim); }
+  label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; white-space: nowrap; }
+  /* Buttons in a row sharing their borders. */
+  .group, .joined { display: inline-flex; }
+  .group > *, .joined > * { border-radius: 0; }
+  .group > * + *, .joined > * + * { margin-left: -1px; }
+  .group > :first-child, .joined > :first-child { border-radius: 3px 0 0 3px; }
+  .group > :last-child, .joined > :last-child { border-radius: 0 3px 3px 0; }
+  .group > :hover, .joined > :hover, .joined > :focus { position: relative; }
+  #flagship { color: var(--ink-dim); padding: 0 8px; background-color: #00000024; font: 16px/1 system-ui, sans-serif; }
+  #flagship[aria-pressed=true] { color: var(--gold); border-color: var(--gold); background-color: #ffd76a22; position: relative; }
+
+  /* Menus: the Load menu (folders, each one's designs to its side) and the right-click menus over it. */
+  .menu {
+    position: fixed; z-index: 10; min-width: 22ch; max-width: min(56ch, calc(100vw - 16px)); max-height: calc(100vh - 16px);
+    overflow-y: auto; padding: 4px 0; background: var(--panel-2); border: 1px solid var(--ink-dim); border-radius: 3px;
+    box-shadow: 0 4px 16px #00000077; white-space: normal;
+  }
+  .menu .empty { padding: 4px 10px; color: var(--ink-dim); }
+  .menu .row { display: flex; align-items: stretch; }
+  .menu .item {
+    flex: 1; min-width: 0; display: flex; gap: 12px; align-items: baseline; width: 100%;
+    border: none; border-radius: 0; padding: 4px 10px; text-align: left;
+  }
+  .menu .item.open { background: var(--hover); }
+  .menu .label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .menu .meta { color: var(--ink-dim); font-size: 11px; }
+  .menu .star { color: var(--gold); font-family: system-ui, sans-serif; }
+  .menu .arrow { color: var(--ink-dim); }
+  .menu .delete { border: none; border-radius: 0; padding: 0 10px; color: var(--ink-dim); }
+  .menu .delete:hover { color: var(--warn); }
+  .menu.context { z-index: 11; }
+  .menu .item.drop { background: var(--hover); outline: 1px dashed var(--ink); outline-offset: -2px; }
+  .menu .item.new .label { color: var(--ink-dim); }
+  .drag-ghost {
+    position: fixed; z-index: 12; pointer-events: none; padding: 3px 8px; background: var(--panel-2);
+    border: 1px solid var(--ink-dim); border-radius: 3px; box-shadow: 0 2px 10px #00000066;
+  }
+  /* A saved design's card, under the pointer (drawn at 3x like the sidebar's: CARD, CARD_SCALE). */
+  #card-preview { position: fixed; z-index: 12; pointer-events: none; }
+  #card-preview canvas { display: block; width: 394px; height: 249px; filter: drop-shadow(0 4px 12px #000000aa); }
+  #card-preview .drawing {
+    padding: 5px 12px; background: var(--panel-2); border: 1px solid var(--ink-dim); border-radius: 3px; color: var(--ink-dim);
+  }
+
+  /* ---- top bar ---- */
+  header {
+    display: flex; gap: 14px; align-items: center; padding: 7px 12px; white-space: nowrap;
+    background-color: var(--panel-2); border-bottom: 1px solid var(--edge);
+  }
+  .brand { letter-spacing: 0.12em; text-transform: uppercase; }
+  .grow { flex: 1; }
+  .credit { color: var(--ink-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+  main { display: flex; min-height: 0; }
+  /* The blueprint sheet, laid into the chrome. */
+  #stage { position: relative; min-height: 0; flex: 1; min-width: 0; background: var(--sheet); }
+  #stage::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    box-shadow: inset 0 0 0 1px var(--edge), inset 0 2px 14px #00000066;
+  }
+
+  /* ---- sidebars: stats (left) and parts list (right); each folds to the bar on its inner edge ---- */
+  aside { display: flex; min-height: 0; }
+  .fold-bar {
+    border: none; border-radius: 0; color: var(--ink-dim); white-space: nowrap; letter-spacing: 0.06em;
+  }
+  .fold-bar:hover { background: var(--hover); color: var(--ink); border: none; }
+  aside > .fold-bar { writing-mode: vertical-rl; width: 24px; padding: 10px 0; text-align: start; }
+  aside > .fold-bar .arrow { text-orientation: upright; }
+  #side-stats > .fold-bar { border-left: 1px solid var(--line); }
+  #side-parts > .fold-bar { border-right: 1px solid var(--line); }
+  aside.collapsed > .fold-bar { border-left: none; border-right: none; }
+  aside .side-body { overflow-y: auto; overflow-x: hidden; flex: 1; padding: 0; display: flex; flex-direction: column; scrollbar-gutter: stable; }
+  aside canvas { display: block; }
+  aside .empty { padding: 0 14px; color: var(--ink-dim); width: 30ch; }
+  #side-stats.collapsed .side-body, #side-parts.collapsed .side-body { display: none; }
+  /* Left side: the ship card (its section folds up to the title bar above it), then the stats. */
+  #card-bar { border-bottom: 1px solid var(--line); padding: 4px 10px; text-align: left; }
+  #card-bar:hover { border-bottom: 1px solid var(--line); }
+  #card-section { padding: 8px 0 6px; border-bottom: 1px solid var(--line); }
+  #card-section.collapsed { display: none; }
+  #card-panel { width: 394px; height: 249px; margin: 0 auto; filter: drop-shadow(0 2px 4px #00000055); }   /* CARD.width; drawn at 3x (CARD_SCALE) */
+  #stats-panel { margin: 10px 0; }
+  /* Right side: the parts list, on ruled paper: 26px lines (RULED.line) and the margin rule (RULED.margin). */
+  #parts-ruled {
+    width: 280px; flex: 1 0 auto;   /* PARTS_W in app.js */
+    background:
+      linear-gradient(to right, transparent 48px, var(--margin-rule) 48px 49px, transparent 49px),
+      repeating-linear-gradient(to bottom, transparent 0 25px, var(--rule) 25px 26px);
+  }
+  #parts-ruled .empty { padding: 5px 0 0 54px; width: auto; }
+
+  /* ---- the stage's overlays ---- */
+  #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: default; touch-action: none; }
+  #view.panning { cursor: grabbing; }
+  #view.holding { cursor: move; }
+  #mode { position: absolute; right: 12px; top: 10px; z-index: 1; background-color: var(--panel-2); }
+  #mode:hover { background-color: var(--panel); }
+  /* The shortcuts, written on the sheet; they fold to their title line. Only that line takes clicks. */
+  #help {
+    position: absolute; left: 12px; bottom: 10px; z-index: 1; pointer-events: none;
+    font-size: 12px; line-height: 1.6; color: var(--ink-dim); text-shadow: 0 0 3px var(--sheet), 0 0 6px var(--sheet);
+  }
+  #help b { color: var(--ink); font-weight: normal; }
+  #help-bar { pointer-events: auto; padding: 0; text-shadow: inherit; }
+  #help-bar:hover { background: none; }
+  #help.collapsed .help-body { display: none; }
+  #toast {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 1; padding: 5px 12px; color: var(--ink);
+    background: var(--panel-2); border: 1px solid var(--warn); border-radius: 3px; box-shadow: 0 2px 10px #00000055;
+    opacity: 0; transition: opacity 0.2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+  #drop-hint {
+    position: absolute; inset: 12px; border: 2px dashed var(--ink-dim); border-radius: 6px; display: none;
+    place-items: center; font-size: 16px; pointer-events: none; background: #184a85aa;
+  }
+  #stage.dragover #drop-hint { display: grid; }
+
+  /* ---- the parts library: tabs over the tray ---- */
+  footer { position: relative; border-top: 1px solid var(--edge); }
+  /* While parts are held the tray doubles as a bin; stronger when the pointer is over it. */
+  footer.holding::after {
+    content: "Drop here to delete"; position: absolute; inset: 0; display: grid; place-items: center;
+    background: #0e2849cc; border: 2px dashed #ff9d8f88; color: var(--warn); font-size: 16px; pointer-events: none;
+  }
+  footer.holding.over::after { background: #0e2849f2; border-color: var(--warn); }
+  /* The tab row is also the library's fold bar: its label, or any of the row outside the tabs, folds it. */
+  #tabs { height: 31px; }
+  #tabs { display: flex; gap: 2px; padding: 6px 10px 0; cursor: pointer; overflow: hidden; }
+  #tabs button { border-bottom: none; border-radius: 3px 3px 0 0; padding: 3px 12px; }
+  #tabs button.active { background: var(--panel); border-color: var(--edge); position: relative; z-index: 1; margin-bottom: -1px; }
+  #tabs > .fold-bar { padding: 3px 0 3px 14px; order: 1; margin-left: auto; }
+  #tabs > .fold-bar:hover { background: none; }
+  footer.collapsed #tabs button:not(.fold-bar) { border-bottom: 1px solid var(--line); border-radius: 3px; }
+  footer.collapsed #tabs button.active { background: transparent; border-color: var(--line); margin-bottom: 0; }
+  footer.collapsed #tabs { height: 37px; }
+  footer.collapsed #tray { display: none; }
+  #tray {
+    display: grid; grid-template-rows: repeat(2, 110px); grid-auto-columns: 96px; /* rows and columns set by app.js */
+    gap: 6px; padding: 8px 10px; overflow-x: auto; border-top: 1px solid var(--edge);
+  }
+  /* The parts lie bare on the tray; hovering one lights its spot. */
+  .part {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 2px 3px;
+    border: 1px solid transparent; border-radius: 3px; cursor: grab; user-select: none; touch-action: none;
+  }
+  .part:hover { border-color: var(--line); background: var(--hover); }
+  .part canvas { width: 90px; height: 88px; pointer-events: none; }
+  .part span { font-size: 11px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
+
+</style>
+
+<header>
+  <strong class="brand">Shipbuilder</strong>
+  <div class="group">
+    <button id="new" title="Start over with just a command bridge">New</button>
+    <label class="button" title="Open a .seria design or a stat card image (or drop one on the page, or paste a screenshot with Ctrl+V)">Open…
+      <input type="file" id="file" accept=".seria,.png,.jpg,.jpeg,.webp" hidden></label>
+    <button id="load" aria-haspopup="true" aria-expanded="false" title="Open a design saved in this browser, or an example">Load ▾</button>
+    <button id="save" title="Save the design in this browser, under its name (Ctrl+S). It stays here for your next visit on this device">Save</button>
+    <button id="download" title="Download the design as a .seria for the game's Ships folder (parts not connected to the bridge are left out)">Download</button>
+  </div>
+  <div class="joined">
+    <input type="text" id="name" spellcheck="false" placeholder="Ship name" title="The ship's name">
+    <button id="flagship" aria-pressed="false" title="Flagship (m_flagship in the ship profile)">★</button>
+  </div>
+  <span class="grow"></span>
+  <span class="credit">Unofficial fan tool · HighFleet © Konstantin Koshutin / MicroProse</span>
+</header>
+
+<main>
+<aside id="side-stats">
+  <div class="side-body">
+    <button id="card-bar" class="fold-bar" title="Show or hide the ship card below"></button>
+    <div id="card-section"><canvas id="card-panel" width="1" height="1"></canvas></div>
+    <canvas id="stats-panel" width="1" height="1"></canvas>
+  </div>
+  <button class="fold-bar" title="Show or hide the card and stats"></button>
+</aside>
+<div id="stage">
+  <canvas id="view"></canvas>
+  <button id="mode"></button>
+  <div id="help">
+    <button id="help-bar" class="fold-bar" title="Show or hide the shortcuts"></button>
+    <div class="help-body">
+    <b>LMB</b>: move · <b>RMB</b> / <b>WASD</b>: pan<br>
+    <b>scroll</b>: zoom · <b>shift</b>: multi-select<br>
+    <b>R</b> / <b>shift-scroll</b>: rotate<br>
+    <b>LMB+RMB</b>: delete · <b>shift+place</b>: duplicate<br>
+    <b>Esc</b>: cancel selection
+    </div>
+  </div>
+  <div id="toast"></div>
+  <div id="drop-hint">Drop a .seria or stat card to open it.</div>
+</div>
+<aside id="side-parts">
+  <button class="fold-bar" title="Show or hide the parts list"></button>
+  <div class="side-body">
+    <div id="parts-ruled"><canvas id="parts-panel" width="1" height="1"></canvas><div class="empty"></div></div>
+  </div>
+</aside>
+</main>
+
+<footer>
+  <div id="tabs"><button class="fold-bar" id="tray-bar"></button></div>
+  <div id="tray"></div>
+</footer>
+
+<script type="module" src="app.js"></script>

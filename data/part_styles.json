@@ -1,0 +1,60 @@
+{
+  "contrast": {
+    "background": { "fill": [28, 80, 141], "ink": 0.5, "detail": 0.35, "hatch": 0.2, "sil": 0.5 },
+    "structure": { "fill": [30, 84, 146], "ink": 0.5, "detail": 0.5, "hatch": 0.25 },
+    "system": { "fill": [36, 97, 164], "ink": 0.8, "detail": 0.8, "hatch": 0.6, "silWidth": 1.5 },
+    "module": {
+      "fill": [66, 133, 202], "ink": 1, "detail": 0.9, "hatch": 0.45, "silWidth": 2.2,
+      "halo": 3, "haloColor": [13, 45, 87], "haloAlpha": 0.75
+    }
+  },
+  "colors": {
+    "silver": [192, 200, 212]
+  },
+  "groups": {
+    "structure": {
+      "sprites": ["*"],
+      "contrast": "structure"
+    },
+    "small hull": {
+      "sprites": ["ferma1x1_*", "ferma2x1_*", "hard1x1_*", "hard2x1_*"],
+      "contrast": "background"
+    },
+    "system": {
+      "sprites": ["fuel*", "escape_pod*", "deck_*", "bridge_armor*"],
+      "contrast": "system"
+    },
+    "legs": {
+      "sprites": ["leg_*", "cylinder*", "wheel*"],
+      "contrast": "structure"
+    },
+    "armor": {
+      "sprites": ["armor_*"],
+      "contrast": "system",
+      "color": "silver"
+    },
+    "modules": {
+      "sprites": [
+        "cannon_*", "missile_*", "nuke_*", "bomb_*", "la29", "t7", "drone_*", "kaz_*", "flare_*", "ml_*",
+        "engine*", "thrust_engine*", "thrust_shield*", "energotech*", "boiler*",
+        "ap_0*", "ap_bridge*", "ap_tower*", "eots*", "elint*", "spo_*", "sonar*", "radar_*", "under_tower*",
+        "carrousel*", "ammo*", "quarters*", "bridge1x1*", "bridge4x4*", "com_*", "combridge*",
+        "lr_radio*", "antenna*", "fss_*", "cargo*", "large_cargo*", "shield_*", "outblock*", "rod_*",
+        "landing_light*"
+      ],
+      "contrast": "module"
+    },
+    "aircraft": {
+      "modules": ["CRAFT_LA29", "CRAFT_T7"],
+      "frame": 60
+    },
+    "fuel tank": {
+      "modules": ["MDL_FUEL_02"],
+      "size": 0.85
+    },
+    "oversized": {
+      "modules": ["MDL_AMMO", "MDL_AMMO_02", "MDL_ENGINE_01", "MDL_FERMA2X2_01", "MDL_FERMA4X4_01"],
+      "size": 0.8
+    }
+  }
+}
