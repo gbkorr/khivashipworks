@@ -6,9 +6,9 @@ import {
   computeStats, Ship, bakeShaded, bakeShadedAsync, drawList, SHADING,
   FONTS, renderPanel, panelHeight, partsList, renderRuledList, ruledListLines, RULED, renderStatCard, statCardLines, CARD,
   encodeDesign, designFromCard, filledHull,
-} from 'src/index.js';
-import MODULES from 'data/modules.json' with { type: 'json' };
-import STRINGS from 'data/strings.json' with { type: 'json' };
+} from './src/index.js';
+import MODULES from './data/modules.json' with { type: 'json' };
+import STRINGS from './data/strings.json' with { type: 'json' };
 
 const $ = (id) => document.getElementById(id);
 const load = (src) => new Promise((ok, err) => {
@@ -16,9 +16,9 @@ const load = (src) => new Promise((ok, err) => {
 });
 const fontNames = Object.keys(FONTS);
 const [atlas, blueprint, contrastBlueprint, ui, ...fontImages] = await Promise.all([
-  load('../assets/Ships1.png'), load('../assets/Ships1_blueprint.png').catch(() => null),
-  load('../assets/Ships1_blueprint_contrast.png').catch(() => null), load('../assets/ui.png').catch(() => null),
-  ...fontNames.map((n) => load(`../assets/fonts/${n}.png`).catch(() => null)),
+  load('./assets/Ships1.png'), load('./assets/Ships1_blueprint.png').catch(() => null),
+  load('./assets/Ships1_blueprint_contrast.png').catch(() => null), load('./assets/ui.png').catch(() => null),
+  ...fontNames.map((n) => load(`./assets/fonts/${n}.png`).catch(() => null)),
 ]);
 const fonts = Object.fromEntries(fontNames.map((n, i) => [n, fontImages[i]]));
 
@@ -1143,7 +1143,7 @@ $('file').onchange = async (e) => {
 // copied), and a design loaded from it is saved to Saved; it can be duplicated into an ordinary folder.
 const SAVED = 'Saved', HIGHFLEET = 'Highfleet';
 const readOnly = (folder) => folder === HIGHFLEET;
-const DESIGNS = '../assets/designs/';
+const DESIGNS = './assets/designs/';
 let loadedId = null;                // the saved design the current one was loaded from or saved as
 let shipsDb = null;
 function openShips() {
