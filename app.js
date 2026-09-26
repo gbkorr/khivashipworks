@@ -6,9 +6,9 @@ import {
   computeStats, Ship, bakeShaded, bakeShadedAsync, drawList, SHADING,
   FONTS, renderPanel, panelHeight, partsList, renderRuledList, ruledListLines, RULED, renderStatCard, statCardLines, CARD,
   encodeDesign, designFromCard, filledHull,
-} from '../src/index.js';
-import MODULES from '../data/modules.json' with { type: 'json' };
-import STRINGS from '../data/strings.json' with { type: 'json' };
+} from 'src/index.js';
+import MODULES from 'data/modules.json' with { type: 'json' };
+import STRINGS from 'data/strings.json' with { type: 'json' };
 
 const $ = (id) => document.getElementById(id);
 const load = (src) => new Promise((ok, err) => {
