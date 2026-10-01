@@ -6,7 +6,9 @@
 //     "contrast": "system",           a key of "contrast" (blueprint drawing parameters)
 //     "color": "silver",              a key of "colors" (tint, see tintColor)
 //     "size": 0.8,                    sprite scale about the part's centre (ship views)
-//     "frame": 60 }                   animation frame to draw (every view; e.g. parked aircraft)
+//     "frame": 60,                    animation frame to draw (every view; e.g. parked aircraft)
+//     "back": true }                  drawn under the rest of its floor (the shipbuilder's blueprint view: hull,
+//                                     armor and legs, so every module on them shows)
 // A part gets the attributes of every group that picks it; later groups win.
 // contrast and color are baked into the contrast blueprint atlas, one look per sprite (a sprite shared
 // by several modules looks the same in all of them), so they go with "sprites". size is applied per
@@ -96,6 +98,8 @@ function moduleMap(key, styles) {
 export const partScales = (styles = PART_STYLES) => moduleMap('size', styles);
 /** Module id -> animation frame map (drawList's default frames). */
 export const partFrames = (styles = PART_STYLES) => moduleMap('frame', styles);
+/** Module id -> true map of the parts drawn under the rest of their floor (drawList's `lower`). */
+export const partsBehind = (styles = PART_STYLES) => moduleMap('back', styles);
 
 /** Default part sizes for the ship views (from PART_STYLES). */
 export const PART_SCALE = partScales();
@@ -104,3 +108,5 @@ export const PART_SCALE = partScales();
  * view, but the game draws parked aircraft side-on (frame 60, canopy and fin up).
  */
 export const PART_FRAMES = partFrames();
+/** Parts the shipbuilder's blueprint view draws under the rest of their floor, so the modules on them show. */
+export const PART_BACK = partsBehind();

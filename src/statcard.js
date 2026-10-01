@@ -5,7 +5,7 @@ import { computeStats } from './stats.js';
 import { bakeShaded, SHADING } from './shading.js';
 import { CARD, CARD_BACKGROUND, outlineImage } from './shipcard.js';
 import { drawText, measureText, makeCanvas } from './font.js';
-import { drawStamp } from './stamp.js';
+import { drawStamp, STAMP } from './stamp.js';
 
 const CREAM = '#fffbdb', DIM = '#fffbdbb0';
 const TEXT_FONT = 'flash_large', LINE = 15;
@@ -15,6 +15,23 @@ function sprite(ctx, ui, name, x, y, w, h) {
   const e = UI[name];
   if (!e || !ui) return;
   ctx.drawImage(ui, e.x, e.y, e.w, e.h, x, y, w ?? e.w, h ?? e.h);
+}
+
+/** A small radiation trefoil (like the game's strategic role icon: a blade up, two down) centred at (x, y). */
+function trefoil(g, x, y, color, r = 5) {
+  g.save();
+  g.fillStyle = color;
+  g.beginPath();
+  g.arc(x, y, r * 0.22, 0, 2 * Math.PI);
+  for (const a of [-90, 30, 150]) {
+    const a0 = (a - 30) * Math.PI / 180, a1 = (a + 30) * Math.PI / 180;
+    g.moveTo(x + r * 0.38 * Math.cos(a0), y + r * 0.38 * Math.sin(a0));
+    g.arc(x, y, r, a0, a1);
+    g.arc(x, y, r * 0.38, a1, a0, true);
+    g.closePath();
+  }
+  g.fill();
+  g.restore();
 }
 
 /**
@@ -33,7 +50,7 @@ function cardFace(ui, name, opts) {
   return c;
 }
 
-/** The card's stat lines as [label, value]; null is a gap between groups (movement, combat, sensors). */
+/** The card's stat lines as [label, value, icon?] (icon: 'nuclear', drawn after the value); null is a gap between groups (movement, combat, sensors). */
 export function statCardLines(s) {
   const lines = [
     ['TR/WT', s.twrFull.toFixed(1)],
@@ -43,8 +60,10 @@ export function statCardLines(s) {
     null,
   ];
   if (Math.trunc(s.combatValue) > 0) lines.push(['COMBAT', String(Math.trunc(s.combatValue))]);
-  if (s.guidance && s.sprints) lines.push(['SPRINT', `${s.guidance}/${s.sprints}`]);
-  if (s.nukesNuclear) lines.push(['NUCLEAR', String(s.nukesNuclear)]);
+  if (s.rockets) lines.push(['ROCKETS', String(s.rockets)]);
+  if (s.guidance && s.sprints) lines.push(['SPRINT', `${s.sprints} (${s.guidance})`]);
+  // Nuclear missiles, when there are any, stand for the lot (a trefoil after the count).
+  if (s.nukesNuclear) lines.push(['MISSILES', String(s.nukesNuclear), 'nuclear']);
   else if (s.missiles) lines.push(['MISSILES', String(s.missiles)]);
   if (s.aircraft.small || s.aircraft.large) lines.push(['AIRCRAFT', `${s.aircraft.small}/${s.aircraft.large}`]);
   if (lines.at(-1)) lines.push(null);
@@ -99,7 +118,7 @@ export function renderStatCard(ctx, ship, opts = {}) {
   const background = CARD_BACKGROUND[stats.class.purpose] ?? 'shipcard_black';
   sprite(ctx, opts.ui, background, x, y);
 
-  // Ship: as on the game's card, 3.5 px/m, shrunk to fit 210x160 by its SIZE box, centred at (-70, +10).
+  // Ship: as on the game's card, 3.5 px/m, shrunk to fit 210x160 by its SIZE box, centred at (-70, +18).
   const ppm = 3.5, sb = stats.sizeBox;
   const scale = ppm * Math.min(1, 210 / (sb.w * ppm), 160 / (sb.h * ppm));
   const pic = opts.atlas && sb.w && sb.h ? shadedPicture(ship, opts.atlas, scale, opts) : null;
@@ -111,7 +130,7 @@ export function renderStatCard(ctx, ship, opts = {}) {
     const cx = ox + UI.shipcard_red.hx, cy = oy + UI.shipcard_red.hy;   // card centre
     if (pic) {
       const px = cx - 70 - (sb.x0 + sb.w / 2 - pic.x0) * scale;
-      const py = cy + 10 - (sb.y0 + sb.h / 2 - pic.y0) * scale;
+      const py = cy + 18 - (sb.y0 + sb.h / 2 - pic.y0) * scale;
       // Kept left of the stats column (antennas, legs, overhangs); drawn over the stamp's eagle.
       g.save();
       g.beginPath();
@@ -134,23 +153,25 @@ export function renderStatCard(ctx, ship, opts = {}) {
     if (opts.flagship) sprite(g, opts.ui, 'flagship_star', cx - 175 + fullW * sq + 6, cy - 102);
 
     // Stats: labels and a value column, their tops level with the name's (the font has 4 px above its capitals).
-    // A long list closes up to stay clear of the price (its last line's top by y 174).
+    // A long list closes up to keep a gap above the price (its last line's top by y 164).
     const valueX = cx + 50 + Math.max(...lines.filter(Boolean).map(([l]) => measureText(TEXT_FONT, l))) + 10;
     // (A line takes a full step, a gap between groups half of one.)
     const top = cy - 100, steps = lines.slice(0, -1).reduce((n, line) => n + (line ? 1 : 0.5), 0);
-    const step = Math.min(LINE, (cy + 50 - top) / Math.max(1, steps));
+    const step = Math.min(LINE, (cy + 40 - top) / Math.max(1, steps));
     let ty = top;
     lines.forEach((line, i) => {
       if (i) ty += lines[i - 1] ? step : step / 2;
       if (!line) return;
       drawText(g, TEXT_FONT, line[0], cx + 50, Math.round(ty), DIM, opts);
       drawText(g, TEXT_FONT, line[1], valueX, Math.round(ty), CREAM, opts);
+      if (line[2] === 'nuclear') trefoil(g, valueX + measureText(TEXT_FONT, line[1]) + 7, Math.round(ty) + 7.5, CREAM);
     });
 
-    // Price + coin, bottom right.
-    const coin = 27;
-    drawText(g, 'dinpro_30_black', price, cx + 178 - coin - 2, cy + 60, CREAM, { ...opts, align: 'right' });
-    sprite(g, opts.ui, 'coin_01', cx + 178 - coin, cy + 64, coin, coin);
+    // Price + coin, bottom right; the stamp's reader finds the card by the coin (STAMP.coin). The price ends just
+    // inside the coin sprite's transparent margin, a few px short of its disc.
+    const C = STAMP.coin;
+    drawText(g, 'dinpro_30_black', price, ox + C.x, oy + C.y - 3, CREAM, { ...opts, align: 'right' });
+    sprite(g, opts.ui, 'coin_01', ox + C.x, oy + C.y, C.d, C.d);
   };
 
   let stamp = null;

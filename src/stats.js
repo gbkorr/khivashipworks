@@ -26,8 +26,10 @@ const SPASM_LEFT = 102, SPASM_RIGHT = 103;
 
 // R-9 SPRINT, the short-range missile (counted for the panel; the game doesn't show it)
 const SPRINT = 'MDL_MISSILE_03';
+// R-5 ZENITH and R-6 NADIR, the anti-missile rockets (counted for the stat card)
+const ROCKETS = new Set(['MDL_MISSILE_01', 'MDL_MISSILE_02']);
 // The guided anti-missiles (R-5 ZENITH, R-6 NADIR, R-9 SPRINT): not counted as missiles
-const INTERCEPTORS = new Set(['MDL_MISSILE_01', 'MDL_MISSILE_02', SPRINT]);
+const INTERCEPTORS = new Set([...ROCKETS, SPRINT]);
 // Aircraft that count as large (the rest are small: LA-29)
 const LARGE_CRAFT = new Set(['CRAFT_T7', 'CRAFT_MB110']);
 
@@ -123,7 +125,7 @@ export function computeStats(ship, modules = MODULES) {
     powerTotal: 0, powerNeed: 0,
     ammo: 0, ammoNeed: 0,
     crewCapacity: 0, crewNeed: 0,
-    fss: 0, extinguishers: 0, sprints: 0, missiles: 0, interceptors: 0, aircraft: { small: 0, large: 0 }, evacPods: 0, signatureIR: 0, guidance: 0,
+    fss: 0, extinguishers: 0, sprints: 0, rockets: 0, missiles: 0, interceptors: 0, aircraft: { small: 0, large: 0 }, evacPods: 0, signatureIR: 0, guidance: 0,
     fuelTotal: 0, aaValue: 0, antiMissileLaunchers: 0, crafts: 0, nukes: 0, nukesNuclear: 0,
     counts: {},
   };
@@ -183,6 +185,7 @@ export function computeStats(ship, modules = MODULES) {
     if (m.mdl_fss_capacity) s.fss += m.mdl_fss_capacity;
     if (has(m, CATEGORY.FSS)) s.extinguishers += 1;
     if (p.oid === SPRINT) s.sprints += 1;
+    if (ROCKETS.has(p.oid)) s.rockets += 1;
     if (m.mdl_guiding) s.guidance += m.mdl_guiding;
     if (m.signature_ir) s.signatureIR += m.signature_ir;
     if (logic === LOGIC.EVAC) s.evacPods += 1;

@@ -32,7 +32,7 @@ export const STAMP = {
   // margin around it.
   emblem: { x: 16, y: 16, h: 88 },
   quiet: 3,
-  coin: { x: 348, y: 188, d: 27 },       // the price's coin (statcard.js)
+  coin: { x: 331, y: 186, d: 36 },       // the price's coin, as statcard.js draws it (its disc ~29 px, as in the game)
   // The card sprite: cells continue over all of it as filler (random, read by nobody), under the eagle and out to
   // the edges, so the stamp reads as the card's texture; the card cuts them to its shape.
   texture: { w: 394, h: 249 },
@@ -405,9 +405,9 @@ const templates = {};
 function coinTemplate() {
   if (templates.coin) return templates.coin;
   const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-  const l = b64(COIN.luma), a = b64(COIN.alpha), n = COIN.size, R = 15, N = 2 * R + 1, o = R - (n - 1) / 2;
+  const l = b64(COIN.luma), a = b64(COIN.alpha), n = COIN.size, o = 2, N = n + 2 * o, R = N / 2;
   // The coin over a darker card (every card colour is darker than the coin), a round window around it: the price
-  // ends 2 card px to its left.
+  // ends a few card px left of its disc.
   const v = new Float32Array(N * N).fill(110), m = new Float32Array(N * N);
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
@@ -711,7 +711,7 @@ function cardOnly(rgb, l, w, h) {
 function findCards(rgb, l, w, h, diag) {
   const onCard = maskedImage(cardOnly(rgb, l, w, h), w, h), plain = plainImage(l, w, h);
   const E = eagleTemplate(), C = coinTemplate();
-  const eagles = search(onCard, E, { D: 20, ratio: 1.12, min: 0.3, keep: 24, from: 0.6 });
+  const eagles = search(onCard, E, { D: 20, ratio: 1.12, min: 0.3, keep: 32, from: 0.6 });
   if (diag) diag.eagles = eagles;
   const ec = [E.x + E.w / 2, E.y + E.h / 2], cc = [C.x + C.w / 2, C.y + C.h / 2], out = [];
   for (const e0 of eagles) {

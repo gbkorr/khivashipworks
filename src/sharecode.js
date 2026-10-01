@@ -11,7 +11,6 @@
 //   Free parts (mounted modules at slot offsets, odd angles): zigzag(dx), zigzag(dy) in 1/128 m, delta coded,
 //   then the angle in 1/64 turns (one byte; 255 = a float32 follows).
 import { BuildModel, BuildPart, GRID, normAngle } from './builder.js';
-import { addChunk, readChunk } from './pngchunk.js';
 import { readStamp } from './stamp.js';
 
 const VERSION = 1;
@@ -157,28 +156,12 @@ export async function decodeDesign(bytes) {
 
 // ---- cards as design files ---------------------------------------------------------------------------------
 
-/** PNG chunk holding the deflated .seria of a stat card. */
-export const SERIA_CHUNK = 'hfSe';
-
-/** A copy of a card PNG carrying the exact design (.seria text or bytes). */
-export async function embedSeria(png, seria) {
-  const bytes = typeof seria === 'string' ? new TextEncoder().encode(seria) : new Uint8Array(seria);
-  return addChunk(png, SERIA_CHUNK, await deflate(bytes));
-}
-
 /**
- * The design carried by a stat card image: the exact .seria from the PNG chunk if the file still has it,
- * otherwise the printed stamp (parts only).
- * @param file      the image file's bytes
- * @param imageData () => { data, width, height } of the decoded image (only called if the chunk is missing)
- * @returns { model, from: 'seria' | 'stamp' } or null
+ * The design printed on a stat card image (its stamp), from the image's pixels ({ data, width, height }); null if
+ * it can't be read.
  */
-export async function designFromCard(file, imageData) {
-  const chunk = readChunk(file, SERIA_CHUNK);
-  if (chunk) {
-    try { return { model: BuildModel.fromSeria(await inflate(chunk)), from: 'seria' }; } catch { /* fall back */ }
-  }
-  const code = readStamp(await imageData());
+export async function designFromCard(imageData) {
+  const code = readStamp(imageData);
   if (!code) return null;
-  try { return { model: await decodeDesign(code), from: 'stamp' }; } catch { return null; }
+  try { return await decodeDesign(code); } catch { return null; }
 }

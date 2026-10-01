@@ -19,16 +19,22 @@ const clampLayer = (z) => Math.max(0, Math.min(LAYERS, z));
  * clamped to 0..69; ties keep file order. Sprites with m_type bit 1 (the hull's back plates) are drawn
  * again on every floor below theirs, fading 0.2 per floor, so raised hull reads as a wall.
  * partScale shrinks (or grows) each body's sprites about the body's own origin: a number for every
- * part, or a map of module id -> scale (missing = 1), like PART_SCALE (src/partstyles.js).
+ * part, or a map of module id -> scale (missing = 1), like PART_SCALE (src/partstyles.js); the map leaves a 2x2
+ * hull with a nuke's silo tube (hull.js) at full size.
  * frames maps module id -> the animation frame to draw instead of the design's (PART_FRAMES).
+ * lower maps module id -> true for parts drawn under everything else on their floor (like PART_BACK); given one,
+ * the list goes floor by floor, the lowered parts' sprites first on each (in depth order among themselves); default
+ * none: depth order throughout.
  * Each entry: { part, sprite, def, x, y, angle, sx, sy, z, frame, alpha }  (x, y in world units)
  */
-export function drawList(ship, sprites = SPRITES, partScale = 1, frames = PART_FRAMES) {
+export function drawList(ship, sprites = SPRITES, partScale = 1, frames = PART_FRAMES, lower = null) {
   const list = [];
   let order = 0;
   for (const part of ship.bodies) {
     const c = Math.cos(part.angle), s = Math.sin(part.angle);
-    const k = typeof partScale === 'number' ? partScale : partScale?.[part.oid] ?? 1;
+    // A 2x2 hull showing a nuke's silo tube stays full size, the size of the nuke in it.
+    const tube = part.sprites.some((sp) => sp.name?.startsWith('tube2x2_'));
+    const k = typeof partScale === 'number' ? partScale : tube ? 1 : partScale?.[part.oid] ?? 1;
     for (const sp of part.sprites) {
       const def = sprites[sp.name];
       if (!def) continue;
@@ -44,17 +50,20 @@ export function drawList(ship, sprites = SPRITES, partScale = 1, frames = PART_F
         z: clampLayer(clampLayer(part.baseStage + part.stage + FLOOR_LAYERS * part.floor) + sp.stage),
         frame: frames[part.oid] ?? sp.frame,
         alpha: 1,
+        floor: part.floor,
+        back: !!lower?.[part.oid],
         order: order++,
       };
       list.push(entry);
       if (sp.type & 1) {
         for (let f = 1; f <= part.floor; f++) {
-          list.push({ ...entry, z: clampLayer(entry.z - FLOOR_LAYERS * f), alpha: Math.max(0, 1 - FLOOR_FADE * f), order: order++ });
+          list.push({ ...entry, z: clampLayer(entry.z - FLOOR_LAYERS * f), floor: part.floor - f, alpha: Math.max(0, 1 - FLOOR_FADE * f), order: order++ });
         }
       }
     }
   }
-  list.sort((a, b) => a.z - b.z || a.order - b.order);
+  if (lower) list.sort((a, b) => a.floor - b.floor || b.back - a.back || a.z - b.z || a.order - b.order);
+  else list.sort((a, b) => a.z - b.z || a.order - b.order);
   return list;
 }
 
@@ -98,6 +107,7 @@ export function wireSegments(ship) {
  *   normals: draw each sprite's normal map (Ships1.res bump=) instead of its colour, for shading.js,
  *   partScale: size of each part's sprites about the part's centre: a number, or a module id -> scale
  *            map like PART_SCALE (default 1: the game's sizes; see drawList),
+ *   lower:   module id -> true map of parts drawn under the rest of their floor, like PART_BACK (see drawList),
  * }
  */
 export function renderShip(ctx, ship, atlas, opts = {}) {
@@ -109,7 +119,7 @@ export function renderShip(ctx, ship, atlas, opts = {}) {
     ox ??= -b.x0 * scale;
     oy ??= -b.y0 * scale;
   }
-  const list = drawList(ship, opts.sprites, opts.partScale);
+  const list = drawList(ship, opts.sprites, opts.partScale, undefined, opts.lower);
   const wires = opts.wires === false || opts.normals ? [] : wireSegments(ship);
   // Wires sit behind everything else, like the game's antenna rendering.
   if (wires.length) {

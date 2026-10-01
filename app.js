@@ -2,12 +2,11 @@
 // The rules, snapping and export live in src/builder.js; this file is input handling and drawing.
 import {
   BuildModel, BuildPart, PART_TEMPLATES, BRIDGE, GRID, computeLinks, placement, snapOffset,
-  rotateParts, dependents, renderShip, shipRenderBounds, drawGraphPaper, paperTexture, BLUEPRINT, PART_SCALE, CATEGORY,
-  computeStats, Ship, bakeShaded, bakeShadedAsync, drawList, SHADING,
-  FONTS, renderPanel, panelHeight, partsList, renderRuledList, ruledListLines, RULED, renderStatCard, statCardLines, CARD,
-  encodeDesign, designFromCard, filledHull,
+  rotateParts, rotationStep, turnPart, turnLegs, restAngle, dependents, renderShip, shipRenderBounds, drawGraphPaper, paperTexture, BLUEPRINT, PART_SCALE, PART_BACK,
+  computeStats, MASS_CLASSES, PURPOSES, ROLES, Ship, bakeShaded, bakeShadedAsync, drawList, SHADING,
+  FONTS, drawText, measureText, statLines, partsList, renderRuledList, ruledListLines, RULED, renderStatCard, statCardLines, CARD,
+  encodeDesign, decodeDesign, deflate, designFromCard, filledHull,
 } from './src/index.js';
-import MODULES from './data/modules.json' with { type: 'json' };
 import STRINGS from './data/strings.json' with { type: 'json' };
 
 const $ = (id) => document.getElementById(id);
@@ -22,14 +21,14 @@ const [atlas, blueprint, contrastBlueprint, ui, ...fontImages] = await Promise.a
 ]);
 const fonts = Object.fromEntries(fontNames.map((n, i) => [n, fontImages[i]]));
 
-// Paper texture (grain, fibres, blotches) laid over the graph paper; a fainter one (another sheet) on the
+// Paper texture (grain, fibres, formation) laid over the graph paper; a fainter one (another sheet) on the
 // panels around it, as CSS background tiles.
 const makeCanvas = (w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h });
 const paper = paperTexture(makeCanvas);
 {
-  const [blotches, grain] = paperTexture(makeCanvas, { seed: 5, strength: 0.6 });
+  const [formation, grain] = paperTexture(makeCanvas, { seed: 5, strength: 0.6 });
   document.documentElement.style.setProperty('--grain', `url(${grain.image.toDataURL()})`);
-  document.documentElement.style.setProperty('--blotches', `url(${blotches.image.toDataURL()})`);
+  document.documentElement.style.setProperty('--formation', `url(${formation.image.toDataURL()})`);
 }
 
 const canvas = $('view');
@@ -136,15 +135,23 @@ function setModel(m) {
 }
 
 // ---- side panels: stat card and stats (left); parts list (right) ------------------------------------------
-const PAD = 14;
 // The parts list's width: its longest line (NUCLEAR MISSILE CARRIER) and a little room (#parts-ruled's width).
 const PARTS_W = 280;
+const STATS_W = 394, STATS_PAD = 14, STATS_LINE = 21, STATS_FONT = 'dinpro_14_reg';   // the card's width
 let current = null;                 // { ship, stats, placed } of the placed parts, from the last stats update
 function drawSidePanels(ship, stats) {
-  const c = $('stats-panel');
-  c.width = CARD.width;
-  c.height = panelHeight(stats);
-  renderPanel(c.getContext('2d'), stats, { fonts, x: PAD, y: 0 });
+  // Stats as label / value rows, in the ruled list's font; warnings in coral (the CSS --warn).
+  const rows = statLines(stats).rows, sk = window.devicePixelRatio || 1;
+  const valueX = STATS_PAD + Math.max(...rows.map((r) => measureText(STATS_FONT, r.label))) + 16;
+  const sp = $('stats-panel'), sh = rows.length * STATS_LINE;
+  sp.width = STATS_W * sk; sp.height = sh * sk;
+  sp.style.width = `${STATS_W}px`; sp.style.height = `${sh}px`;
+  const sg = sp.getContext('2d');
+  sg.scale(sk, sk);
+  rows.forEach((r, i) => {
+    const c = r.red ? '#ff9d8f' : '#ecf4ff', y = i * STATS_LINE + 1;
+    if (r.label) for (const [t, x] of [[r.label, STATS_PAD], [r.value, valueX]]) drawText(sg, STATS_FONT, t, x, y, c, { fonts });
+  });
 
   // Ruled list; the rules themselves are the side panel's CSS background, so they carry on below it.
   const sections = partsList(ship);
@@ -297,6 +304,16 @@ for (const [el, button, label] of sections) {
   set(on);
 }
 
+// A left click on the ship card folds it, like its title bar.
+$('card-panel').addEventListener('click', () => $('card-bar').click());
+
+// A click anywhere on the shortcuts folds them; scrolling over them still zooms.
+$('help').addEventListener('click', (e) => { if (!$('help-bar').contains(e.target)) $('help-bar').click(); });
+$('help').addEventListener('wheel', (e) => {
+  e.preventDefault();
+  canvas.dispatchEvent(new WheelEvent('wheel', e));
+}, { passive: false });
+
 // ---- hit testing -------------------------------------------------------------------------------------
 function inside(poly, x, y) {
   let hit = false;
@@ -428,6 +445,9 @@ function chordDelete() {
     selection = new Set(lastDrop.parts.filter((p) => model.parts.includes(p)));
   }
   lastDrop = null;
+  // Only what's under the pointer: a chord elsewhere leaves the selection be.
+  const under = partAt(pointer.wx, pointer.wy);
+  if (!under || !dependents(model.parts, [...selection]).includes(under)) return draw();
   removeSelection();
 }
 
@@ -480,24 +500,40 @@ function cancelHold() {
   changed();
 }
 
-/** R / shift+wheel: turn the held group, or the selection, by quarter turns (1 = 90 degrees clockwise). */
-function rotate(turns = 1) {
-  turns = ((turns % 4) + 4) % 4;
-  if (!turns) return;
+/**
+ * Turn a group by `dir` steps (dir > 0: clockwise). A lone part turns by its own step (90, 45 or 15 degrees;
+ * false if it doesn't turn), and so do legs, each chain about its top mount. Any other group turns by quarters
+ * about (cx, cy), and its parts that don't turn on their own go back to their resting angle.
+ */
+function turnGroup(group, dir, cx, cy) {
+  if (group.length === 1) return turnPart(group[0], dir);
+  if (turnLegs(model.parts, group, dir)) return true;
+  for (let i = 0; i < ((dir % 4) + 4) % 4; i++) rotateParts(group, cx, cy);
+  for (const p of group) if (!rotationStep(p.oid)) p.angle = restAngle(p.oid);
+  return true;
+}
+
+const allLegs = (group) => group.every((p) => p.joint === 'leg');
+
+/** R / shift+wheel: turn the held group, or the selection, by `dir` steps (> 0 clockwise, < 0 anticlockwise). */
+function rotate(dir = 1) {
+  if (!dir) return;
+  const fixed = (p) => toast(`${trayItem(p.oid).name} doesn't rotate.`);
   if (held) {
     const { primary } = held;
-    for (let i = 0; i < turns; i++) rotateParts(held.group, primary.x, primary.y);
+    const [px, py] = [primary.x, primary.y];
+    if (!turnGroup(held.group, dir, primary.x, primary.y)) return fixed(primary);
     // Keep the current offset: the rotated positions become the new bases.
     for (const p of held.group) held.bases.set(p, [p.x - held.offset[0], p.y - held.offset[1]]);
-    // Turning about the primary part leaves it (and so a multiselection's grab) in place; a single part
-    // is re-centred on the cursor.
-    if (held.single) held.grab = centerOffset(primary);
+    // Turning about the primary part leaves it (and so a multiselection's grab) in place; legs keep their
+    // pivot where it is, and any other single part is re-centred on the cursor.
+    if (allLegs(held.group)) held.grab = [held.grab[0] - (primary.x - px), held.grab[1] - (primary.y - py)];
+    else if (held.single) held.grab = centerOffset(primary);
     held.freeSlots = freeSlotsFor(held);
     follow();
     return;
   }
   if (!selection.size) return toast('Select parts (or hold one) to rotate.');
-  snapshot();
   const group = dependents(model.parts, [...selection]);
   const before = new Map(group.map((p) => [p, { x: p.x, y: p.y, angle: p.angle }]));
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -505,8 +541,11 @@ function rotate(turns = 1) {
     const b = p.bounds();
     x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
   }
-  for (let i = 0; i < turns; i++) rotateParts(group, (x0 + x1) / 2, (y0 + y1) / 2);
-  const primary = group.find((p) => !p.mounted) ?? group[0];
+  snapshot();
+  if (!turnGroup(group, dir, (x0 + x1) / 2, (y0 + y1) / 2)) { undoStack.pop(); return fixed(group[0]); }
+  // Snap by the structure, or by the top of a leg chain.
+  const { host } = computeLinks(model.parts);
+  const primary = group.find((p) => !p.mounted) ?? group.find((p) => !group.includes(host.get(p))) ?? group[0];
   const bases = new Map(group.map((p) => [p, [p.x, p.y]]));
   const [dx, dy] = snapOffset(model.parts, group, primary, 0, 0, bases);
   for (const p of group) { p.x += dx; p.y += dy; }
@@ -627,14 +666,15 @@ function paint() {
   else {
     const view = model.view();
     renderShip(ctx, view, atlasNow(), {
-      scale: cam.scale, x: cam.ox, y: cam.oy, partScale: PART_SCALE, wireColor: wireColor(),
+      scale: cam.scale, x: cam.ox, y: cam.oy, partScale: PART_SCALE, lower: PART_BACK, wireColor: wireColor(),
     });
   }
 
   const lw = Math.max(1, dpr * 1.2);
-  // Parts breaking a rule.
+  // Parts breaking a rule (being left unconnected doesn't count: that's just work in progress).
   if (!held) {
-    for (const [p] of problems) {
+    for (const [p, msgs] of problems) {
+      if (msgs.every((m) => m === 'not connected to the bridge')) continue;
       tracePoly(p.polygon());
       ctx.fillStyle = rgba(WARN, 0.18); ctx.fill();
       ctx.strokeStyle = rgba(WARN, 0.9); ctx.lineWidth = lw; ctx.stroke();
@@ -727,7 +767,8 @@ function fit() {
 
 let toastTimer = 0;
 function toast(msg) {
-  const t = $('toast');
+  const t = $('toast'), g = $('gallery');
+  (g.open ? g : $('stage')).append(t);   // over the gallery while it's open (a modal hides the page)
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
@@ -743,7 +784,18 @@ function updatePointer(e) {
   [pointer.wx, pointer.wy] = toWorld(pointer.x, pointer.y);
 }
 
-canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+// The right (or middle) button pans from anywhere on the page, bar the menus (their own right-click menus), the
+// ship card and the gallery (the browser's menu, to save a card), text fields and links; the browser's menu is kept for those.
+const ownsRightClick = (el) => !!el.closest?.('.menu, #card-panel, #gallery, input, textarea, select, a');
+window.addEventListener('contextmenu', (e) => { if (!ownsRightClick(e.target)) e.preventDefault(); });
+window.addEventListener('pointerdown', (e) => {
+  if ((e.button !== 2 && e.button !== 1) || ownsRightClick(e.target)) return;
+  updatePointer(e);
+  e.preventDefault();   // (no middle-button autoscroll)
+  mode = mode === 'idle' ? 'pan' : mode;
+  pan = { x: pointer.x, y: pointer.y, prevMode: mode };
+  canvas.classList.add('panning');
+});
 
 // A second button pressed while one is down doesn't fire pointerdown, but does fire mousedown.
 window.addEventListener('mousedown', (e) => {
@@ -751,14 +803,8 @@ window.addEventListener('mousedown', (e) => {
 });
 
 canvas.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;   // (right and middle: the page-wide pan above)
   updatePointer(e);
-  if (e.button === 2 || e.button === 1) {
-    mode = mode === 'idle' ? 'pan' : mode;
-    pan = { x: pointer.x, y: pointer.y, prevMode: mode };
-    canvas.classList.add('panning');
-    return;
-  }
-  if (e.button !== 0) return;
   if (mode === 'carry') return drop(e.shiftKey);
   if (mode !== 'idle') return;
   const part = partAt(pointer.wx, pointer.wy);
@@ -860,18 +906,24 @@ window.addEventListener('pointerup', (e) => {
   }
 });
 
-// Shift+wheel turns parts: one quarter turn per notch (clockwise when scrolling down), rate-limited so
-// touchpads don't spin them.
-let wheelTurn = 0, wheelTurnAt = 0;
+// Shift+wheel turns parts: one step per wheel notch (anticlockwise when scrolling down). A notch is the
+// smallest wheel-sized delta seen so far, so an event that coalesces several notches turns several steps.
+// Touchpads (small deltas) build up to a step, rate-limited so they don't spin parts.
+let wheelTurn = 0, wheelTurnAt = 0, wheelNotch = Infinity;
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   updatePointer(e);
   if (e.shiftKey) {
-    const d = e.deltaY || e.deltaX;   // some browsers turn shift+wheel into horizontal scroll
-    wheelTurn += d * (e.deltaMode === 1 ? 33 : 1);
+    const d = (e.deltaY || e.deltaX) * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 800 : 1);   // shift+wheel may scroll horizontally
+    if (Math.abs(d) >= 40) {
+      wheelNotch = Math.min(wheelNotch, Math.abs(d));
+      wheelTurn = 0;
+      return rotate(-Math.sign(d) * Math.max(1, Math.round(Math.abs(d) / wheelNotch)));
+    }
+    wheelTurn += d;
     const now = performance.now();
     if (Math.abs(wheelTurn) >= 50 && now - wheelTurnAt > 120) {
-      rotate(wheelTurn > 0 ? 1 : -1);
+      rotate(wheelTurn > 0 ? -1 : 1);
       wheelTurn = 0;
       wheelTurnAt = now;
     }
@@ -897,6 +949,10 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'delete' || k === 'backspace') { e.preventDefault(); if (e.shiftKey) pruneUnconnected(); else removeSelection(); }
   else if (k === 'escape') { if (held) cancelHold(); else { selection.clear(); draw(); } }
   else if (k === 'f') fit();
+  // Fold or open the stats (T), the parts list (P) and the library (L), as their bars do; on All too.
+  else if (k === 't' && !e.repeat) $('side-stats').querySelector(':scope > .fold-bar').click();
+  else if (k === 'p' && !e.repeat) $('side-parts').querySelector(':scope > .fold-bar').click();
+  else if (k === 'l' && !e.repeat) setCollapsed(!footer.classList.contains('collapsed'));
 });
 window.addEventListener('keyup', (e) => panKeys.delete(e.key.toLowerCase()));
 window.addEventListener('blur', () => panKeys.clear());
@@ -926,53 +982,92 @@ function startKeyPan() {
 }
 
 // ---- parts tray ------------------------------------------------------------------------------------------
-const C = CATEGORY;
+// Each tab's parts, in order; `:filled` is a filled 2x2 hull (the art a generator or quarters gives it), an item of
+// its own. Parts on no list stay out of the library (they still open in a design).
+const hulls = (kind) => ['1X1_04', '1X1_01', '2X1_01', '2X2_04', '2X2_02', '2X2_03', '2X2_01'].map((s) => `MDL_${kind}${s}`);
 const GROUPS = [
-  ['Hull', C.HULL | C.BRIDGE | C.DECK],
-  ['Armor', C.ARMOR],
-  ['Weapons', C.GUN | C.BOMB],
-  ['Missiles', C.MISSILE | C.NUKE],
-  ['Propulsion', C.ENGINE | C.LEG],
-  ['Systems', C.FUEL | C.AMMO | C.FSS | C.EVAC | C.SYSTEM | C.FLARES | C.KAZ],
-  ['Sensors', C.SENSOR | C.IRST | C.JAMMER],
+  ['Hull', [...hulls('FERMA'), 'MDL_FERMA2X2_01:filled']],
+  ['Reinforced', hulls('HARD')],
+  ['Structural', ['MDL_FERMA4X4_01', 'MDL_COMBRIDGE_01', 'MDL_DECK_01', 'MDL_ARMOR2X1_01', 'MDL_ARMOR1X1_01', 'MDL_ARMOR1X1_02',
+    'MDL_ARMOR1X1_03', 'MDL_ARMOR1X1_04']],
+  ['Propulsion', ['MDL_ENGINE_03', 'MDL_ENGINE_04', 'MDL_ENGINE_05', 'MDL_ENGINE_01', 'MDL_ENGINE_02', 'MDL_LEG_01', 'MDL_LEG_02',
+    'MDL_LEG_03', 'MDL_LEG_04', 'MDL_WHEEL_01']],
+  ['Weapons', ['MDL_CANNON_30_6', 'MDL_CANNON_57_2', 'MDL_CANNON_100_2', 'MDL_CANNON_130', 'MDL_CANNON_180', 'MDL_CANNON_180_2',
+    'MDL_CANNON_305_2', 'MDL_RSZO_220']],
+  ['Missiles', ['MDL_NUKE_01_CONV', 'MDL_NUKE_02_CONV', 'MDL_NUKE_03_CONV', 'MDL_NUKE_04_CONV', 'MDL_NUKE_01', 'MDL_NUKE_02',
+    'MDL_NUKE_03', 'MDL_NUKE_04']],
+  ['Tactical', ['MDL_MISSILE_03', 'MDL_KAZ', 'MDL_FLARES', 'MDL_EVAC', 'MDL_FSS_02', 'MDL_BOMB_01', 'MDL_MISSILE_01',
+    'MDL_MISSILE_02', 'CRAFT_LA29', 'CRAFT_T7']],
+  ['Systems', ['MDL_FUEL_02', 'MDL_FUEL_03', 'MDL_FUEL_01', 'MDL_GENERATOR_01', 'MDL_GENERATOR_02',
+    'MDL_QUARTERS_01', 'MDL_QUARTERS_02', 'MDL_AMMO_02', 'MDL_AMMO']],
+  ['Sensors', ['MDL_ANTENNA_01', 'MDL_RADAR_01', 'MDL_RADAR_02', 'MDL_FCR_01', 'MDL_FCR_02', 'MDL_SPO_01',
+    'MDL_SPO_02', 'MDL_IRST_01', 'MDL_JAMMER_01']],
+  ['Hidden', ['MDL_CANNON_HARPOON', 'MDL_CANNON_04', 'MDL_PROTECTOR_01', 'MDL_MISSILE_CLUSTER_SFW_01', 'MDL_TORPEDO_300',
+    'MDL_LCARGO_01', 'MDL_MISSILE_DRUM_01', 'MDL_FCR_03', 'MDL_LRRADIO_01']],
 ];
-const EXTRA_GROUP = { MDL_WHEEL_01: 'Propulsion', MDL_ANTENNA_01: 'Sensors', MDL_LRRADIO_01: 'Sensors' };
+// What the library calls each part (others go by their name in the game).
+const LABELS = {
+  MDL_FERMA1X1_04: '1/2', MDL_FERMA1X1_01: '1x1', MDL_FERMA2X1_01: '2x1', MDL_FERMA2X2_04: 'TRI',
+  MDL_FERMA2X2_02: 'QUARTER', MDL_FERMA2X2_03: 'KNOB', MDL_FERMA2X2_01: 'HULL', 'MDL_FERMA2X2_01:filled': 'FILLED',
+  MDL_HARD1X1_04: '1/2', MDL_HARD1X1_01: '1x1', MDL_HARD2X1_01: '2x1', MDL_HARD2X2_04: 'TRI',
+  MDL_HARD2X2_02: 'QUARTER', MDL_HARD2X2_03: 'KNOB', MDL_HARD2X2_01: 'HULL',
+  MDL_FERMA4X4_01: 'LARGE HULL', MDL_COMBRIDGE_01: 'BRIDGE', MDL_DECK_01: 'FLIGHT DECK', MDL_ARMOR2X1_01: 'LARGE ARMOR',
+  MDL_ARMOR1X1_01: 'ARMOR', MDL_ARMOR1X1_02: 'QUARTER', MDL_ARMOR1X1_03: 'TRI', MDL_ARMOR1X1_04: 'CORNER',
+  MDL_LEG_01: 'LEG S', MDL_LEG_02: 'LEG M', MDL_LEG_03: 'LEG L', MDL_LEG_04: 'LEG XL', MDL_WHEEL_01: 'WHEEL',
+  MDL_CANNON_30_6: 'CIWS', MDL_CANNON_57_2: 'VYMPEL', MDL_CANNON_100_2: 'AK-100', MDL_CANNON_130: 'MOLOT',
+  MDL_CANNON_180: 'MK-180', MDL_CANNON_180_2: 'SARMAT', MDL_CANNON_305_2: 'SQUALL', MDL_RSZO_220: 'MRL',
+  MDL_MISSILE_03: 'SPRINT', MDL_KAZ: 'PALASH', MDL_FLARES: 'FLARES', MDL_EVAC: 'EVAC', MDL_FSS_02: 'FSS',
+  MDL_BOMB_01: 'FAB', MDL_MISSILE_01: 'ZENITH', MDL_MISSILE_02: 'NADIR', CRAFT_T7: 'T-7', CRAFT_LA29: 'LA-29',
+  MDL_FUEL_02: 'FUEL L', MDL_FUEL_03: 'FUEL M', MDL_FUEL_01: 'FUEL S', MDL_GENERATOR_01: 'POWER M',
+  MDL_GENERATOR_02: 'POWER S', MDL_QUARTERS_01: 'CREW M', MDL_QUARTERS_02: 'CREW S', MDL_AMMO_02: 'AMMO M',
+  MDL_AMMO: 'AMMO S',
+  MDL_ANTENNA_01: 'ANTENNA', MDL_RADAR_01: 'RADAR L', MDL_RADAR_02: 'RADAR M', MDL_FCR_01: 'FCR M', MDL_FCR_02: 'FCR S',
+  MDL_SPO_01: 'ELINT M', MDL_SPO_02: 'ELINT S', MDL_IRST_01: 'MARS', MDL_JAMMER_01: 'LAGOON',
+  MDL_CANNON_HARPOON: 'HARPOON', MDL_CANNON_04: 'CANNON 04', MDL_PROTECTOR_01: 'PROTECTOR',
+  MDL_MISSILE_CLUSTER_SFW_01: 'CLUSTER', MDL_TORPEDO_300: 'TORPEDO', MDL_LCARGO_01: 'CARGO',
+  MDL_MISSILE_DRUM_01: 'MISSILE DRUM', MDL_FCR_03: 'FCR', MDL_LRRADIO_01: 'ARRAY',
+};
 const partName = (oid) => {
   const n = STRINGS.en[oid];
   return n && n !== '-' ? n : oid.replace(/^MDL_/, '').replace(/_/g, ' ').toLowerCase();
 };
-// Library items: { key, oid, raw (template), name }. Most are a module's own template; the filled 2x2 hulls
-// (the art a generator or quarters gives them) follow their plain hull as items of their own.
-const FILLED = { MDL_FERMA2X2_01: 'FILLED HULL' };
-// Parts left out of the library (they can still be opened in a design).
-const NOT_IN_TRAY = new Set(['MDL_CANNON_HARPOON', 'MDL_TORPEDO_300', 'MDL_CANNON_04', 'MDL_MISSILE_CLUSTER_SFW_01', 'MDL_FCR_03']);
-const trayGroups = new Map([...GROUPS.map(([g]) => [g, []]), ['Other', []]]);
-for (const oid of Object.keys(PART_TEMPLATES)) {
-  if (PART_TEMPLATES[oid].noTray || NOT_IN_TRAY.has(oid)) continue;
-  const cat = MODULES[oid]?.category ?? 0;
-  // Reinforced hull goes with the armor.
-  const g = EXTRA_GROUP[oid] ?? (oid.startsWith('MDL_HARD') ? 'Armor' : GROUPS.find(([, bits]) => cat & bits)?.[0] ?? 'Other');
-  if (g === 'Other') continue;   // the tab stays, empty for now
-  trayGroups.get(g).push({ key: oid, oid, raw: PART_TEMPLATES[oid], name: partName(oid) });
-  if (FILLED[oid]) trayGroups.get(g).push({ key: `${oid}:filled`, oid, raw: filledHull(PART_TEMPLATES[oid]), name: FILLED[oid] });
-}
+// Library items: { key, oid, raw (template), name }. A part comes out of the library at its template's angle
+// (the aircraft, taken from designs, are turned a quarter there).
+const trayItem = (key) => {
+  const [oid, filled] = key.split(':');
+  const raw = PART_TEMPLATES[oid];
+  return { key, oid, raw: filled ? filledHull(raw) : raw, name: LABELS[key] ?? partName(oid) };
+};
+const trayGroups = new Map(GROUPS.map(([g, keys]) => [g, keys.filter((k) => PART_TEMPLATES[k.split(':')[0]]).map(trayItem)]));
+// All: every part of the other tabs, tab by tab, in a tray that wraps and scrolls (its height dragged by the tab row).
+const ALL = 'All';
+const allItems = [...trayGroups.values()].flat();
 
 let tab = 'Hull';
+let lastTab = 'Hull';   // the tab before All, which All's button goes back to
 const thumbs = [];
 function buildTray() {
   const tabs = $('tabs');
-  tabs.replaceChildren(trayBar, ...[...trayGroups.keys()].map((g) => {
+  tabs.replaceChildren(trayBar, ...[...trayGroups.keys(), ALL].map((g) => {
     const b = document.createElement('button');
     b.textContent = g;
     b.className = g === tab ? 'active' : '';
-    b.onclick = () => { tab = g; setCollapsed(false); buildTray(); };
+    if (g === ALL) b.id = 'all-tab';
+    b.onclick = () => {
+      if (g !== ALL) tab = g;
+      else if (tab === ALL) { if (!footer.classList.contains('collapsed')) tab = lastTab; }   // (folded: just opens it)
+      else { lastTab = tab; tab = ALL; }
+      setCollapsed(false);
+      buildTray();
+    };
     return b;
   }));
+  footer.classList.toggle('all', tab === ALL);
+  labelTrayBar();
   thumbs.length = 0;
-  $('tray').replaceChildren(...trayGroups.get(tab).map((item) => {
+  $('tray').replaceChildren(...(tab === ALL ? allItems : trayGroups.get(tab)).map((item) => {
     const el = document.createElement('div');
     el.className = 'part';
-    el.title = `${item.name}\n${item.oid}`;
     const c = document.createElement('canvas');
     const label = document.createElement('span');
     label.textContent = item.name;
@@ -983,7 +1078,7 @@ function buildTray() {
       e.stopPropagation();
       if (held) return deleteHeld();   // putting a part back in the library deletes it
       updatePointer(e);
-      const p = new BuildPart(item.oid, pointer.wx, pointer.wy, 0, item.raw);
+      const p = new BuildPart(item.oid, pointer.wx, pointer.wy, item.raw.m_angle ?? 0, item.raw);
       trayPress = { cx: e.clientX, cy: e.clientY };
       selection.clear();
       hold([p], p, true, 'tray-press');
@@ -1001,6 +1096,12 @@ const TILE = 96, TILE_GAP = 6, TRAY_PAD = 10;
 const longestTab = Math.max(...[...trayGroups.values()].map((g) => g.length));
 function layoutTray() {
   const tray = $('tray');
+  if (tab === ALL) {
+    tray.style.gridTemplateRows = tray.style.gridTemplateColumns = '';   // (the stylesheet's: wrap to the width)
+    sizeAllTray();
+    return;
+  }
+  tray.style.height = tray.style.paddingBlock = '';
   if (!tray.clientWidth) return;   // folded
   const rows = longestTab * TILE + (longestTab - 1) * TILE_GAP <= tray.clientWidth - 2 * TRAY_PAD ? 1 : 2;
   tray.style.gridTemplateRows = `repeat(${rows}, 110px)`;
@@ -1008,21 +1109,49 @@ function layoutTray() {
 }
 new ResizeObserver(layoutTray).observe(document.querySelector('footer'));
 let trayPress = null;
+/** The All tray at allHeight; dragged right down, it loses its padding too and closes up to the tab row. */
+function sizeAllTray() {
+  const tray = $('tray');
+  tray.style.height = `${allHeight}px`;
+  tray.style.paddingBlock = allHeight < 2 * 8 + 1 ? '0' : '';
+}
+let allHeight = 2 * 110 + 6 + 2 * 8 + 1;   // the All tray's height (px): two rows to start with
+try { const h = localStorage.getItem('shipbuilder.allHeight'); if (h) allHeight = Number(h) || 0; } catch { /* storage may be off */ }
 
 // The parts tray folds down to its tab row (remembered per browser): the row's label, or a click on the row
-// outside the tabs, folds it; picking a tab opens it.
+// outside the tabs, folds it; picking a tab opens it. On the All tab the row is dragged instead, to size the tray.
 const trayBar = $('tray-bar');
-const toggleTray = () => setCollapsed(!document.querySelector('footer').classList.contains('collapsed'));
+const toggleTray = () => tab !== ALL && setCollapsed(!document.querySelector('footer').classList.contains('collapsed'));
 trayBar.onclick = toggleTray;
 $('tabs').addEventListener('click', (e) => { if (e.target === e.currentTarget) toggleTray(); });
+$('tabs').addEventListener('pointerdown', (e) => {
+  if (tab !== ALL || e.button !== 0 || (e.target !== e.currentTarget && e.target !== trayBar)) return;
+  e.preventDefault();
+  const tray = $('tray'), y0 = e.clientY, h0 = tray.offsetHeight;
+  const move = (ev) => {
+    allHeight = Math.round(Math.max(0, Math.min(innerHeight * 0.75, h0 + y0 - ev.clientY)));
+    sizeAllTray();
+  };
+  const end = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', end);
+    try { localStorage.setItem('shipbuilder.allHeight', String(allHeight)); } catch { /* storage may be off */ }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', end);
+});
+function labelTrayBar() {
+  const on = footer.classList.contains('collapsed');
+  trayBar.textContent = tab === ALL && !on ? '↕ library' : `${on ? '▴' : '▾'} library`;
+  trayBar.title = tab === ALL && !on ? 'Drag to size the library' : on ? 'Show the library' : 'Hide the library';
+}
 function setCollapsed(on) {
   document.querySelector('footer').classList.toggle('collapsed', on);
-  trayBar.textContent = `${on ? '▴' : '▾'} library`;
-  trayBar.title = on ? 'Show the library' : 'Hide the library';
+  labelTrayBar();
   try { localStorage.setItem('shipbuilder.trayCollapsed', on ? '1' : ''); } catch { /* storage may be off */ }
 }
-try { setCollapsed(localStorage.getItem('shipbuilder.trayCollapsed') === '1'); } catch { setCollapsed(false); }
 const footer = document.querySelector('footer');
+try { setCollapsed(localStorage.getItem('shipbuilder.trayCollapsed') === '1'); } catch { setCollapsed(false); }
 const overFooter = (e) => {
   const r = footer.getBoundingClientRect();
   return e.clientY >= r.top && e.clientY <= r.bottom && e.clientX >= r.left && e.clientX <= r.right;
@@ -1051,7 +1180,7 @@ function drawThumbs() {
     const { oid, key } = item;
     c.width = 90 * k; c.height = 88 * k;
     const g = c.getContext('2d');
-    const part = new BuildPart(oid, 0, 0, 0, item.raw);
+    const part = new BuildPart(oid, 0, 0, item.raw.m_angle ?? 0, item.raw);
     const view = new BuildModel({ parts: [part] }).view();
     const f = part.bounds(), fw = (f.x1 - f.x0) / GRID, fh = (f.y1 - f.y0) / GRID;
     const blocks = TRUE_SIZE.has(oid) || (!part.mounted && [fw, fh].every((v) => v > 0.5 && Math.abs(v - Math.round(v)) < 0.25));
@@ -1098,10 +1227,47 @@ $('flagship').onclick = () => {
   $('flagship').setAttribute('aria-pressed', model.flagship);
   if (current) drawSidePanels(current.ship, current.stats);
 };
+// ---- dialogs: in-page stand-ins for confirm() and prompt() --------------------------------------------------
+const dialog = $('dialog');
+/**
+ * Ask the user something in a dialog over the page. Resolves to true / false, or with `input` (the starting
+ * text) to the text entered / null. opts { ok, cancel: button labels, input, danger: the OK button in the warning
+ * colour }. Enter is OK; Escape, Cancel or a click outside is Cancel.
+ */
+function ask(message, { ok = 'OK', cancel = 'Cancel', input, danger = false } = {}) {
+  const el = (tag, props) => Object.assign(document.createElement(tag), props);
+  const field = input === undefined ? null : el('input', { type: 'text', value: input, spellcheck: false });
+  const okButton = el('button', { textContent: ok, className: danger ? 'danger' : '' });
+  const cancelButton = el('button', { textContent: cancel });
+  const body = el('div', { className: 'body' });
+  body.append(el('p', { textContent: message }), ...(field ? [field] : []), el('div', { className: 'buttons' }));
+  body.lastChild.append(cancelButton, okButton);
+  dialog.replaceChildren(body);
+  dialog.showModal();
+  if (field) { field.focus(); field.select(); } else okButton.focus();
+  return new Promise((resolve) => {
+    const finish = (yes) => {
+      dialog.close();
+      resolve(field ? (yes ? field.value : null) : yes);
+    };
+    okButton.onclick = () => finish(true);
+    cancelButton.onclick = () => finish(false);
+    dialog.oncancel = (e) => { e.preventDefault(); finish(false); };
+    dialog.onclick = (e) => { if (e.target === dialog) finish(false); };
+    // The page's own shortcuts don't see keys pressed here.
+    dialog.onkeydown = (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter' && e.target !== cancelButton) { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    };
+  });
+}
+
 /** Whether the current design can be replaced: unedited, or the user says so. */
-const mayDiscard = (what) => !edited || model.parts.length <= 1 || confirm(`${what} Unsaved changes are lost.`);
-$('new').onclick = () => {
-  if (!mayDiscard('Start a new design?')) return;
+const mayDiscard = async (what) => !edited || model.parts.length <= 1 ||
+  ask(`${what} Unsaved changes are lost.`, { ok: 'Discard changes', danger: true });
+$('new').onclick = async () => {
+  if (!await mayDiscard('Start a new design?')) return;
   setModel(BuildModel.blank('New ship'));
   loadedId = null;
 };
@@ -1117,11 +1283,12 @@ async function imagePixels(bytes) {
 async function open(buffer, name) {
   try {
     const bytes = new Uint8Array(buffer);
+    if (isPdf(bytes)) return importPdf(name, bytes);
     if (!isImage(bytes)) setModel(BuildModel.fromSeria(buffer));
     else {
-      const got = await designFromCard(bytes, () => imagePixels(bytes));
+      const got = await designFromCard(await imagePixels(bytes));
       if (!got) return toast(`Unable to read ${name}; try with a higher resolution.`);
-      setModel(got.model);
+      setModel(got);
     }
     loadedId = null;
   } catch (err) {
@@ -1133,12 +1300,16 @@ $('file').onchange = async (e) => {
   if (f) open(await f.arrayBuffer(), f.name);
   e.target.value = '';
 };
+$('open').onclick = () => { closeAllMenus(); $('file').click(); };
 
 // ---- the ship list: designs saved in this browser, in folders ------------------------------------------------
-// IndexedDB (a .seria is a few hundred KB, too big for localStorage's few MB). Stores: ships (the list: id, name,
-// folder, parts, flagship, saved), serias (each saved design's .seria by id, read only to load it) and folders
-// (name, order). A name is unique within its folder. The game's own designs (npm run designs: assets/designs/)
-// are listed in a Highfleet folder; their .seria is fetched from `url` when needed. Highfleet
+// IndexedDB. Stores: ships (the list: id, name, folder, parts, flagship, saved), designs (each saved design as a
+// .shipcard by id: the parts, packed as the card's stamp packs them (encodeDesign), a few hundred bytes; read only
+// to load it) and folders (name, order). A name is unique within its folder. The game's own designs (npm run
+// designs: assets/designs/) are listed in a Highfleet folder; their .shipcard is fetched from `url` when needed.
+// A .shipcard keeps the parts, the name and the flagship flag: all a design is. What else a .seria sets per part
+// (floors, mirroring, fuel load...) the game works out again on load, as toSeria does. Before version 5 designs were kept as .seria; those are packed on the next visit
+// (packSerias), and any that can't be (a module the code doesn't know) stay a .seria. Highfleet
 // can't be changed: not renamed, deleted or merged, nothing put in or taken out (a design dragged out of it is
 // copied), and a design loaded from it is saved to Saved; it can be duplicated into an ordinary folder.
 const SAVED = 'Saved', HIGHFLEET = 'Highfleet';
@@ -1148,12 +1319,12 @@ let loadedId = null;                // the saved design the current one was load
 let shipsDb = null;
 function openShips() {
   return shipsDb ??= new Promise((ok, err) => {
-    const req = indexedDB.open('shipbuilder', 4);
+    const req = indexedDB.open('shipbuilder', 5);
     req.onupgradeneeded = (e) => {
       const db = req.result, tx = req.transaction, old = e.oldVersion;
       const create = () => {
         db.createObjectStore('ships', { keyPath: 'id', autoIncrement: true });
-        db.createObjectStore('serias', { keyPath: 'id' });
+        db.createObjectStore('designs', { keyPath: 'id' });
       };
       if (old < 2) db.createObjectStore('folders', { keyPath: 'name' });
       const folders = tx.objectStore('folders');
@@ -1163,6 +1334,15 @@ function openShips() {
       folders.put({ name: HIGHFLEET, order: 1 });
       try { localStorage.removeItem('shipbuilder.designsListed'); } catch { /* storage may be off */ }   // (versions 2, 3)
       if (!old) return create();
+      if (old === 4) {
+        // The .serias move to designs as they are, to be packed once the database is open.
+        const store = db.createObjectStore('designs', { keyPath: 'id' });
+        tx.objectStore('serias').getAll().onsuccess = (b) => {
+          for (const r of b.target.result) store.put(r);
+          db.deleteObjectStore('serias');
+        };
+        return;
+      }
       // Up to version 3 designs were keyed by name (unique across folders; version 1 kept the .seria in the record,
       // and had no folders). SAVED is now Saved; EXAMPLES (Borey and Voskhod, copied in) gave way to Highfleet, the
       // copies going and anything saved into it moving to Saved.
@@ -1172,7 +1352,7 @@ function openShips() {
           db.deleteObjectStore('ships');
           if (old >= 2) db.deleteObjectStore('serias');
           create();
-          const ships = tx.objectStore('ships'), store = tx.objectStore('serias');
+          const ships = tx.objectStore('ships'), store = tx.objectStore('designs');
           for (const { seria, ...ship } of list) {
             if (ship.saved === 0 && !ship.url) continue;
             if (!ship.folder || ship.folder === 'SAVED' || ship.folder === 'EXAMPLES') ship.folder = SAVED;
@@ -1184,32 +1364,58 @@ function openShips() {
         else tx.objectStore('serias').getAll().onsuccess = (b) => rebuild(new Map(b.target.result.map((r) => [r.name, r.seria])));
       };
     };
-    req.onsuccess = () => ok(listGameDesigns(req.result));
+    req.onsuccess = () => ok(packSerias(req.result).then(listGameDesigns));
     req.onerror = () => err(req.error);
   });
 }
-/** Any of the game's designs missing from the Highfleet folder into it (on every visit: it can't be changed). */
+/** Saved designs still kept as .seria packed into .shipcards (see above). */
+async function packSerias(db) {
+  try {
+    const old = (await done(db.transaction('designs').objectStore('designs').getAll())).filter((r) => r.seria);
+    const packed = [];
+    for (const { id, seria } of old) {
+      try { packed.push({ id, shipcard: await encodeDesign(BuildModel.fromSeria(seria)) }); } catch { /* stays a .seria */ }
+    }
+    if (packed.length) {
+      const tx = db.transaction('designs', 'readwrite');
+      for (const r of packed) tx.objectStore('designs').put(r);
+      await finished(tx);
+    }
+  } catch { /* tried again next time */ }
+  return db;
+}
+/**
+ * The game's designs into the Highfleet folder (on every visit: it can't be changed): any missing, and the file of
+ * any listed from an older extract (a .seria then).
+ */
 async function listGameDesigns(db) {
   try {
     const index = await (await fetch(`${DESIGNS}index.json`)).json();
     const tx = db.transaction(['ships'], 'readwrite'), ships = tx.objectStore('ships');
-    const listed = namesIn(await done(ships.getAll()), HIGHFLEET);
+    const listed = new Map((await done(ships.getAll())).filter((s) => s.folder === HIGHFLEET).map((s) => [s.name, s]));
     for (const d of index) {
-      if (!listed.has(d.name)) ships.add({ name: d.name, folder: HIGHFLEET, parts: d.parts, flagship: d.flagship, saved: 0, url: DESIGNS + encodeURIComponent(d.file) });
+      const url = DESIGNS + encodeURIComponent(d.file), got = listed.get(d.name);
+      if (!got) ships.add({ name: d.name, folder: HIGHFLEET, parts: d.parts, flagship: d.flagship, saved: 0, url });
+      else if (got.url !== url) ships.put({ ...got, url });
     }
     await finished(tx);
   } catch { /* not extracted here */ }
   return db;
 }
-/** A listed design's .seria: saved in the browser, or the game's. */
-async function seriaOf(ship) {
-  const { serias } = await shipTx(['serias']);
-  const got = await done(serias.get(ship.id));
-  if (got) return got.seria;
-  if (!ship.url) throw new Error('its design is missing');
-  const res = await fetch(ship.url);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return new Uint8Array(await res.arrayBuffer());
+/** A listed design (saved in the browser, or the game's), under its listed name. */
+async function designOf(ship) {
+  const { designs } = await shipTx(['designs']);
+  const got = await done(designs.get(ship.id));
+  let m;
+  if (got) m = got.shipcard ? await decodeDesign(got.shipcard) : BuildModel.fromSeria(got.seria);
+  else {
+    if (!ship.url) throw new Error('its design is missing');
+    const res = await fetch(ship.url);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    m = await decodeDesign(new Uint8Array(await res.arrayBuffer()));
+  }
+  m.name = ship.name;
+  return m;
 }
 const done = (req) => new Promise((ok, err) => { req.onsuccess = () => ok(req.result); req.onerror = () => err(req.error); });
 const finished = (tx) => new Promise((ok, err) => { tx.oncomplete = () => ok(); tx.onerror = tx.onabort = () => err(tx.error); });
@@ -1236,12 +1442,12 @@ function freeName(name, taken) {
   if (!taken.has(name)) return name;
   for (let i = 2; ; i++) if (!taken.has(`${name} (${i})`)) return `${name} (${i})`;
 }
-/** Copy designs (their .seria too, if saved) into `folder`, under `names` (one each). In an open transaction `t`. */
+/** Copy designs (their .shipcard too, if saved) into `folder`, under `names` (one each). In an open transaction `t`. */
 async function copyShips(t, ships, folder, names) {
   for (const [i, { id, ...ship }] of ships.entries()) {
     const copy = await done(t.ships.add({ ...ship, folder, name: names[i] }));
-    const got = await done(t.serias.get(id));
-    if (got) t.serias.put({ id: copy, seria: got.seria });
+    const got = await done(t.designs.get(id));
+    if (got) t.designs.put({ ...got, id: copy });
   }
 }
 
@@ -1253,16 +1459,16 @@ async function saveShip() {
     const from = all.find((s) => s.id === loadedId);
     const folder = from && !readOnly(from.folder) ? from.folder : SAVED;
     const same = all.find((s) => s.folder === folder && s.name === name);
-    if (same && same.id !== loadedId && !confirm(`Replace "${name}" in ${folder}?`)) return;
+    if (same && same.id !== loadedId && !await ask(`Replace "${name}" in ${folder}?`, { ok: 'Replace', danger: true })) return;
     // The whole design, unconnected parts too: it's work in progress. Over the one it was loaded from (renamed, if
     // it was), unless another of the new name is replaced.
-    const seria = model.toSeria();
+    const shipcard = await encodeDesign(model);
     const target = same ?? (from?.folder === folder ? from : null);
-    const t = await shipTx(['ships', 'serias', 'folders'], true);
+    const t = await shipTx(['ships', 'designs', 'folders'], true);
     if (!await done(t.folders.get(folder))) t.folders.put({ name: folder, order: folder === SAVED ? 0 : Date.now() });
     const ship = { name, folder, parts: model.parts.length, flagship: model.flagship, saved: Date.now() };
     const id = await done(t.ships.put(target ? { ...ship, id: target.id } : ship));
-    t.serias.put({ id, seria });
+    t.designs.put({ id, shipcard });
     await t.done;
     navigator.storage?.persist?.();   // ask the browser not to clear it to free space
     loadedId = id;
@@ -1279,21 +1485,20 @@ window.addEventListener('keydown', (e) => {
 
 async function loadShip(ship) {
   closeAllMenus();
-  if (!mayDiscard(`Load ${ship.name}?`)) return;
+  if (!await mayDiscard(`Load ${ship.name}?`)) return false;
   try {
-    const m = BuildModel.fromSeria(await seriaOf(ship));
-    m.name = ship.name;
-    setModel(m);
+    setModel(await designOf(ship));
     loadedId = ship.id;
-  } catch (err) { toast(`Couldn't load ${ship.name}: ${err.message}.`); }
+    return true;
+  } catch (err) { toast(`Couldn't load ${ship.name}: ${err.message}.`); return false; }
 }
 async function deleteShip(ship) {
   if (readOnly(ship.folder)) return;
-  if (!confirm(`Delete the saved ship "${ship.name}"? This can't be undone.`)) return;
+  if (!await ask(`Delete the saved ship "${ship.name}"? This can't be undone.`, { ok: 'Delete', danger: true })) return;
   try {
-    const t = await shipTx(['ships', 'serias'], true);
+    const t = await shipTx(['ships', 'designs'], true);
     t.ships.delete(ship.id);
-    t.serias.delete(ship.id);
+    t.designs.delete(ship.id);
     await t.done;
     if (loadedId === ship.id) loadedId = null;
     toast(`Deleted ${ship.name}.`);
@@ -1306,7 +1511,7 @@ async function moveShip(ship, folder) {
   if (readOnly(folder)) return toast(`${folder} can't be changed.`);
   const copy = readOnly(ship.folder);
   try {
-    const t = await shipTx(['ships', 'serias', 'folders'], true);
+    const t = await shipTx(['ships', 'designs', 'folders'], true);
     if (!await done(t.folders.get(folder))) t.folders.put({ name: folder, order: Date.now() });
     const name = freeName(ship.name, namesIn(await done(t.ships.getAll()), folder));
     if (copy) await copyShips(t, [ship], folder, [name]);
@@ -1333,10 +1538,52 @@ async function mergeFolders(from, into) {
   } catch (err) { toast(`Couldn't merge ${from}: ${err.message}.`); }
   refreshShipList(into);
 }
+/**
+ * A folder of .serias (the game's Ships folder, say) saved as a new folder of designs, each packed into a .shipcard
+ * like a saved one; other files are skipped. Numbered if there's a folder of that name already. (A gallery PDF is
+ * taken the same way: importPdf.)
+ */
+async function importFolder(name, files) {
+  const serias = files.filter((f) => /\.seria$/i.test(f.name));
+  if (!serias.length) return toast(`No .seria files in ${name}.`);
+  // Read and packed first: a transaction closes if it waits on anything else.
+  const designs = [], failed = [];
+  for (const f of serias) {
+    try {
+      const m = BuildModel.fromSeria(await f.arrayBuffer());
+      if (!m.parts.length) throw new Error('no parts');
+      designs.push({ name: m.name?.trim() || f.name.replace(/\.seria$/i, ''), parts: m.parts.length, flagship: m.flagship,
+        saved: f.lastModified || Date.now(), shipcard: await encodeDesign(m) });
+    } catch { failed.push(f.name); }
+  }
+  if (!designs.length) return toast(`Couldn't read any of the ${serias.length} .serias in ${name}.`);
+  return importDesigns(name, designs, failed);
+}
+/** Designs ({ name, parts, flagship, saved, shipcard }) saved as a new folder (numbered if `name` is taken). */
+async function importDesigns(name, designs, failed = []) {
+  try {
+    const t = await shipTx(['ships', 'designs', 'folders'], true);
+    const folder = freeName(name, new Set((await done(t.folders.getAll())).map((f) => f.name)));
+    t.folders.put({ name: folder, order: Date.now() });
+    const taken = new Set();
+    for (const { shipcard, ...ship } of designs) {
+      ship.name = freeName(ship.name, taken);
+      taken.add(ship.name);
+      const id = await done(t.ships.add({ ...ship, folder }));
+      t.designs.put({ id, shipcard });
+    }
+    await t.done;
+    navigator.storage?.persist?.();
+    toast(`Saved ${designs.length} design${designs.length > 1 ? 's' : ''} to ${folder}` +
+      (failed.length ? ` (couldn't read ${failed.length}: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}).` : '.'));
+    closeAllMenus();
+    openShipList(folder);
+  } catch (err) { toast(`Couldn't save ${name}: ${err.message}.`); }
+}
 /** A copy of a folder and its designs: "<name> Copy". */
 async function duplicateFolder({ name, ships }) {
   try {
-    const t = await shipTx(['ships', 'serias', 'folders'], true);
+    const t = await shipTx(['ships', 'designs', 'folders'], true);
     const to = freeName(`${name} Copy`, new Set((await done(t.folders.getAll())).map((f) => f.name)));
     t.folders.put({ name: to, order: Date.now() });
     await copyShips(t, ships, to, ships.map((s) => s.name));
@@ -1344,6 +1591,68 @@ async function duplicateFolder({ name, ships }) {
     toast(`Duplicated ${name} as ${to}.`);
     refreshShipList(to);
   } catch (err) { toast(`Couldn't duplicate ${name}: ${err.message}.`); }
+}
+/**
+ * A folder's designs as a .zip of a folder of .serias (the complement of importFolder), each as the Download button
+ * makes it: unconnected parts left out.
+ */
+async function downloadFolder({ name, ships }) {
+  if (!ships.length) return toast(`${name} has no designs.`);
+  const files = [], failed = [], taken = new Set();
+  let loose = 0;
+  for (const ship of ships) {
+    try {
+      const got = connected(new Set(), await designOf(ship));
+      loose += got.loose;
+      const file = freeName(safeFileName(ship.name), taken);
+      taken.add(file);
+      files.push({ name: `${file}.seria`, bytes: got.ship.toSeria() });
+    } catch { failed.push(ship.name); }
+  }
+  const folder = safeFileName(name);
+  try {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await zip(files.map((f) => ({ ...f, name: `${folder}/${f.name}` }))));
+    a.download = `${folder}.zip`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } catch (err) { return toast(`Couldn't download ${name}: ${err.message}.`); }
+  toast(`Downloaded ${files.length} design${files.length !== 1 ? 's' : ''} from ${name}` +
+    ` as ${folder}.zip` +
+    (loose ? `, leaving out ${loose} unconnected part${loose > 1 ? 's' : ''}` : '') +
+    (failed.length ? ` (couldn't make ${failed.length}: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''})` : '') + '.');
+}
+/** A .zip of `files` ({ name, bytes }), each deflated. */
+async function zip(files) {
+  const crcTable = zip.crc ??= Array.from({ length: 256 }, (_, n) => {
+    for (let k = 0; k < 8; k++) n = n & 1 ? 0xedb88320 ^ (n >>> 1) : n >>> 1;
+    return n >>> 0;
+  });
+  const crc32 = (b) => { let c = ~0; for (const x of b) c = crcTable[(c ^ x) & 255] ^ (c >>> 8); return ~c >>> 0; };
+  const parts = [], central = [];
+  let offset = 0;
+  for (const f of files) {
+    const name = new TextEncoder().encode(f.name), data = await deflate(f.bytes), crc = crc32(f.bytes);
+    // version 2.0, flags (bit 11: UTF-8 names), deflate, no date, crc, sizes, name length
+    const fields = [[20, 2], [0x800, 2], [8, 2], [0, 2], [0x21, 2], [crc, 4], [data.length, 4], [f.bytes.length, 4], [name.length, 2]];
+    const head = (sig, pre, post) => {
+      const all = [[sig, 4], ...pre, ...fields, ...post];
+      const b = new Uint8Array(all.reduce((n, [, k]) => n + k, 0)), v = new DataView(b.buffer);
+      let at = 0;
+      for (const [x, k] of all) { k === 4 ? v.setUint32(at, x, true) : v.setUint16(at, x, true); at += k; }
+      return b;
+    };
+    const local = head(0x04034b50, [], [[0, 2]]);
+    parts.push(local, name, data);
+    central.push(head(0x02014b50, [[20, 2]], [[0, 2], [0, 2], [0, 2], [0, 2], [0, 4], [offset, 4]]), name);
+    offset += local.length + name.length + data.length;
+  }
+  const size = central.reduce((n, b) => n + b.length, 0);
+  const end = new Uint8Array(22), v = new DataView(end.buffer);
+  v.setUint32(0, 0x06054b50, true);
+  v.setUint16(8, files.length, true); v.setUint16(10, files.length, true);
+  v.setUint32(12, size, true); v.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, end], { type: 'application/zip' });
 }
 async function renameFolder(from, to) {
   if (readOnly(from)) return;
@@ -1362,10 +1671,11 @@ async function renameFolder(from, to) {
 async function deleteFolder({ name, ships }) {
   if (readOnly(name)) return;
   const n = ships.length;
-  if (!confirm(`Delete the folder "${name}"${n ? ` and the ${n} design${n > 1 ? 's' : ''} in it` : ''}? This can't be undone.`)) return;
+  const what = `the folder "${name}"${n ? ` and the ${n} design${n > 1 ? 's' : ''} in it` : ''}`;
+  if (!await ask(`Delete ${what}? This can't be undone.`, { ok: 'Delete', danger: true })) return;
   try {
-    const t = await shipTx(['ships', 'serias', 'folders'], true);
-    for (const s of ships) { t.ships.delete(s.id); t.serias.delete(s.id); }
+    const t = await shipTx(['ships', 'designs', 'folders'], true);
+    for (const s of ships) { t.ships.delete(s.id); t.designs.delete(s.id); }
     t.folders.delete(name);
     await t.done;
     if (ships.some((s) => s.id === loadedId)) loadedId = null;
@@ -1381,7 +1691,7 @@ async function newFolder(name) {
   } catch (err) { toast(`Couldn't make ${name}: ${err.message}.`); }
   refreshShipList(name);
 }
-const folderName = (message, name = '') => prompt(message, name)?.trim() || null;
+const folderName = async (message, name = '') => (await ask(message, { input: name }))?.trim() || null;
 
 // ---- cascading menus: the Load menu (folders, their designs to the side) and right-click menus over it --------
 // A stack of lists per menu; hovering an item with a submenu opens it to the side (after a moment if another is
@@ -1532,9 +1842,13 @@ async function openShipList(folder = null) {
     accepts: (ship) => ship.folder !== f.name && !readOnly(f.name),
     onDrop: (ship) => moveShip(ship, f.name),
     onContext: (e) => showMenu('context', 0, readOnly(f.name) ? [
+      { label: 'Gallery', onClick: () => openGallery(f) },
       { label: 'Duplicate', onClick: () => { closeMenus('context'); duplicateFolder(f); } },
+      { label: 'Download', onClick: () => { closeMenus('context'); downloadFolder(f); } },
     ] : [
-      { label: 'Rename…', onClick: () => { const n = folderName('Rename the folder:', f.name); if (n && n !== f.name) renameFolder(f.name, n); else closeMenus('context'); } },
+      { label: 'Gallery', onClick: () => openGallery(f) },
+      { label: 'Download', onClick: () => { closeMenus('context'); downloadFolder(f); } },
+      { label: 'Rename…', onClick: async () => { const n = await folderName('Rename the folder:', f.name); if (n && n !== f.name) renameFolder(f.name, n); else closeMenus('context'); } },
       {
         label: 'Merge with…',
         submenu: () => {
@@ -1548,8 +1862,8 @@ async function openShipList(folder = null) {
   // A new folder: clicked for an empty one, or with a design dropped on it.
   items.push({
     label: 'New folder…',
-    onClick: () => { const n = folderName('New folder name:'); if (n) newFolder(n); },
-    onDrop: (ship) => { const n = folderName(`New folder for ${ship.name}:`); if (n) moveShip(ship, n); },
+    onClick: async () => { const n = await folderName('New folder name:'); if (n) newFolder(n); },
+    onDrop: async (ship) => { const n = await folderName(`New folder for ${ship.name}:`); if (n) moveShip(ship, n); },
   });
   const root = showMenu('load', 0, items, below(loadButton));
   loadButton.setAttribute('aria-expanded', true);
@@ -1558,39 +1872,49 @@ async function openShipList(folder = null) {
   root.querySelector('.row:last-child .item').classList.add('new');
 }
 // Hovering a design shows its stat card beside the list: drawn a step at a time, and dropped if the pointer leaves
-// first. Drawn once per saved version, then kept.
-const previewCards = new Map();     // design id -> { saved, card: Promise<canvas | null>, done, aborted }
+// first. Drawn once per saved version (and name), then kept as a PNG (an object URL; a 3x canvas would be a few MB),
+// for the hover and the gallery alike.
+const previewCards = new Map();     // design id -> { key, card: Promise<{ url, info } | null>, done, aborted }
 const preview = Object.assign(document.createElement('div'), { id: 'card-preview', hidden: true });
 document.body.append(preview);
 let previewing = null;
 const nextTask = () => new Promise((ok) => setTimeout(ok, 0));
-/** The card of a saved design, drawn a step at a time; null if it was aborted (see abortCard) first. */
+/** A saved design's card ({ canvas, stats, name }), drawn a step at a time; null if `cancelled()` first. */
+async function drawShipCard(ship, cancelled = () => false) {
+  const m = await designOf(ship);
+  await nextTask();
+  if (cancelled()) return null;
+  const { ship: placed } = connected(new Set(), m);
+  const built = new Ship(placed.toTree()), stats = computeStats(built);
+  await nextTask();
+  if (cancelled()) return null;
+  const pic = await bakeShadedAsync(placed.view(), atlas, newCanvas, SHADING, { cancelled });
+  if (cancelled()) return null;
+  const code = await encodeDesign({ name: m.name, flagship: m.flagship, parts: placed.parts });
+  await nextTask();
+  if (cancelled()) return null;
+  const c = document.createElement('canvas');
+  drawCard(c, { ship: built, stats }, code, pic, m);
+  return { canvas: c, stats, name: m.name };
+}
+/** What the gallery sorts and filters by, from a card's stats. */
+const cardInfo = (s, name) => ({
+  name, price: s.price, combat: s.combatValue, firepower: s.firepower.total, twr: s.twr, speed: s.speedKmh,
+  range: s.fuelCapacity > 0 ? s.rangeKm : 0, mass: s.mass, parts: s.partCount,
+  roles: ROLES.map(([id]) => id).filter((id) => s.roles.values[id] > 0), purpose: s.class.purpose ?? 'GROUND_VEHICLE',
+  size: s.class.purpose ? s.class.size : null,
+});
+/** The card of a saved design ({ url: an object URL of its PNG, info: cardInfo }), drawn a step at a time; null if
+ * it was aborted (see abortCard) first. */
 function cardOfShip(ship) {
-  const got = previewCards.get(ship.id);
-  if (got?.saved === ship.saved && !got.aborted) return got.card;
-  const entry = { saved: ship.saved, done: false, aborted: false };
+  const key = `${ship.saved};${ship.name}`, got = previewCards.get(ship.id);
+  if (got?.key === key && !got.aborted) return got.card;
+  got?.card.then((c) => c && URL.revokeObjectURL(c.url), () => {});   // an older version's
+  const entry = { key, done: false, aborted: false };
   const cancelled = () => entry.aborted;
-  entry.card = (async () => {
-    const seria = await seriaOf(ship);
-    await nextTask();
-    if (cancelled()) return null;
-    const m = BuildModel.fromSeria(seria);
-    m.name = ship.name;
-    await nextTask();
-    if (cancelled()) return null;
-    const { ship: placed } = connected(new Set(), m);
-    const built = new Ship(placed.toTree()), stats = computeStats(built);
-    await nextTask();
-    if (cancelled()) return null;
-    const pic = await bakeShadedAsync(placed.view(), atlas, newCanvas, SHADING, { cancelled });
-    if (cancelled()) return null;
-    const code = await encodeDesign({ name: m.name, flagship: m.flagship, parts: placed.parts });
-    await nextTask();
-    if (cancelled()) return null;
-    const c = document.createElement('canvas');
-    drawCard(c, { ship: built, stats }, code, pic, m);
-    return c;
-  })();
+  entry.card = drawShipCard(ship, cancelled).then(async (c) => c && {
+    url: URL.createObjectURL(await new Promise((ok) => c.canvas.toBlob(ok))), info: cardInfo(c.stats, c.name),
+  });
   entry.card.then((c) => { entry.done = true; if (!c && previewCards.get(ship.id) === entry) previewCards.delete(ship.id); },
     () => previewCards.delete(ship.id));
   previewCards.set(ship.id, entry);
@@ -1607,7 +1931,7 @@ function abortCard(ship) {
 function showCardPreview(ship, item) {
   previewing = item;
   cardOfShip(ship).then((c) => {
-    if (previewing === item && c) placePreview(item, c);
+    if (previewing === item && c) placePreview(item, Object.assign(document.createElement('img'), { src: c.url, alt: '' }));
   }, (err) => {
     if (previewing === item) placePreview(item, Object.assign(document.createElement('div'), { className: 'drawing', textContent: `Couldn't draw the card: ${err.message}.` }));
   });
@@ -1629,6 +1953,221 @@ function hideCardPreview() {
 window.addEventListener('pointerdown', (e) => { if (e.button === 0) hideCardPreview(); }, { capture: true });
 window.addEventListener('wheel', hideCardPreview, { capture: true, passive: true });
 
+// ---- the gallery: every card of a folder, three to a row, in a popup ----------------------------------------------
+// The cards come from the hover's cache (cardOfShip), drawn there one after another under a progress bar, and are
+// shown once all are, sorted and filtered by what cardInfo keeps. Closed early, those drawn so far stay cached for
+// next time. A card loads its design; Export makes a PDF of the cards shown, with their designs attached.
+const gallery = $('gallery');
+const GALLERY_SORTS = [
+  ['price', 'Price'], ['combat', 'Combat value'],
+  ['speed', 'Cruise speed'], ['range', 'Range'], ['mass', 'Mass'], ['parts', 'Parts'], ['name', 'Name'],
+];
+const classLabel = (id) => STRINGS.en[`${id}_CLASS`] ?? id;
+const PURPOSE_ORDER = [...Object.values(PURPOSES).map(([id]) => id), 'GROUND_VEHICLE'];
+const SIZE_ORDER = MASS_CLASSES.map(([, id]) => id);
+const gallerySort = { key: 'price', desc: false };   // kept from one gallery to the next
+let galleryRun = null;              // { cancelled, ship (the one being drawn) } of the one open
+function openGallery(f) {
+  closeAllMenus();
+  const run = { cancelled: false, ship: null };
+  galleryRun = run;
+  const el = (tag, props, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+  const n = f.ships.length, designs = (k) => `${k} design${k !== 1 ? 's' : ''}`;
+  const bar = el('progress', { max: n, value: 0 });
+  const status = el('div', { className: 'status', textContent: `Drawing ${n} card${n !== 1 ? 's' : ''}…` });
+  const grid = el('div', { className: 'grid', hidden: true });
+  const body = el('div', { className: 'body' }, el('div', { className: 'loading' }, bar, status), grid);
+  const exportButton = el('button', { textContent: 'Export', title: `Save the cards shown as a PDF, ${PDF_COLUMNS * PDF_ROWS} to a page, their designs attached (open it here to get them back as a folder)`, disabled: true });
+  const downloadButton = el('button', { textContent: 'Download', title: 'Download the folder as .serias (a .zip)' });
+  const closeButton = el('button', { textContent: 'Close' });
+  const count = el('span', { className: 'title', textContent: `${f.name} · ${designs(n)}` });
+  const head = el('div', { className: 'head' }, count, el('span', { className: 'grow' }), exportButton, downloadButton, closeButton);
+  // Sort (a stat, either way) and filters (role, type, size: those the folder has), once the cards are drawn.
+  const sortBy = el('select', { title: 'Sort by' }, ...GALLERY_SORTS.map(([value, label]) => el('option', { value, textContent: label })));
+  const sortDir = el('button', { className: 'dir' });
+  const roleFilter = el('select', { title: 'Show only ships with this role' });
+  const typeFilter = el('select', { title: 'Show only this type of ship' });
+  const sizeFilter = el('select', { title: 'Show only ships of this size' });
+  const tools = el('div', { className: 'tools', hidden: true },
+    el('label', {}, 'Sort', sortBy), sortDir, el('span', { className: 'gap' }),
+    el('label', {}, 'Role', roleFilter), el('label', {}, 'Type', typeFilter), el('label', {}, 'Size', sizeFilter));
+  gallery.replaceChildren(head, tools, body);
+  gallery.showModal();
+  closeButton.focus();
+  closeButton.onclick = () => gallery.close();
+  downloadButton.onclick = () => downloadFolder(f);
+  if (!n) status.textContent = 'No designs here yet.';
+
+  (async () => {
+    const items = [], failed = [];
+    for (const [i, ship] of f.ships.entries()) {
+      run.ship = ship;
+      try {
+        const c = await cardOfShip(ship);
+        if (run.cancelled) return;
+        if (c) items.push({ ship, ...c });
+      } catch { failed.push(ship.name); }
+      if (run.cancelled) return;
+      bar.value = i + 1;
+      status.textContent = `Drawing cards: ${i + 1} / ${n}`;
+    }
+    run.ship = null;
+    if (!n) return;
+    for (const it of items) {
+      it.img = el('img', { src: it.url, alt: it.ship.name, title: `Load ${it.ship.name}` });
+      it.img.onclick = async () => { if (await loadShip(it.ship)) gallery.close(); };
+    }
+    // Each filter lists what the folder has (with counts), in the game's order.
+    const fill = (select, any, ids, label) => {
+      const counts = new Map();
+      for (const id of ids.flat()) if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+      select.replaceChildren(el('option', { value: '', textContent: any }),
+        ...[...counts].map(([id, k]) => el('option', { value: id, textContent: `${label(id)} (${k})` })));
+    };
+    const byOrder = (order) => (a, b) => order.indexOf(a) - order.indexOf(b);
+    fill(roleFilter, 'All', items.map((it) => it.info.roles).flat().sort(byOrder(ROLES.map(([id]) => id))).map((r) => [r]),
+      (id) => STRINGS.en[`LABLE_${id}`] ?? id);
+    fill(typeFilter, 'All', items.map((it) => [it.info.purpose]).sort((a, b) => byOrder(PURPOSE_ORDER)(a[0], b[0])), classLabel);
+    fill(sizeFilter, 'All', items.map((it) => [it.info.size]).sort((a, b) => byOrder(SIZE_ORDER)(a[0], b[0])), classLabel);
+    sortBy.value = gallerySort.key;
+    let shown = [];
+    const show = () => {
+      const role = roleFilter.value, type = typeFilter.value, size = sizeFilter.value, { key, desc } = gallerySort;
+      sortDir.textContent = desc ? '↓' : '↑';
+      sortDir.title = desc ? 'Highest first (click for lowest first)' : 'Lowest first (click for highest first)';
+      shown = items.filter((it) => (!role || it.info.roles.includes(role)) && (!type || it.info.purpose === type) && (!size || it.info.size === size));
+      const v = (it) => it.info[key];
+      shown.sort((a, b) => (key === 'name' ? v(a).localeCompare(v(b)) : v(a) - v(b)) * (desc ? -1 : 1) || a.info.name.localeCompare(b.info.name));
+      grid.replaceChildren(...shown.map((it) => it.img));
+      count.textContent = `${f.name} · ${shown.length === items.length ? designs(items.length) : `${shown.length} of ${designs(items.length)}`}`;
+      exportButton.disabled = !shown.length;
+    };
+    sortBy.onchange = () => { gallerySort.key = sortBy.value; show(); };
+    sortDir.onclick = () => { gallerySort.desc = !gallerySort.desc; show(); };
+    roleFilter.onchange = typeFilter.onchange = sizeFilter.onchange = show;
+    show();
+    body.firstChild.remove();
+    grid.hidden = tools.hidden = false;
+    exportButton.onclick = async () => {
+      exportButton.disabled = true;
+      try { await exportGallery(f.name, shown); } catch (err) { toast(`Couldn't export ${f.name}: ${err.message}.`); }
+      exportButton.disabled = false;
+    };
+    if (failed.length) toast(`Couldn't draw ${failed.length} card${failed.length > 1 ? 's' : ''}: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}.`);
+  })();
+}
+gallery.addEventListener('close', () => {
+  if (!galleryRun) return;
+  galleryRun.cancelled = true;
+  if (galleryRun.ship) abortCard(galleryRun.ship);   // (the cards already drawn stay cached)
+  galleryRun = null;
+  $('stage').append($('toast'));
+  gallery.replaceChildren();
+});
+gallery.addEventListener('keydown', (e) => e.stopPropagation());   // not the page's shortcuts
+
+// The PDF: pages of 3 x 6 cards on the gallery's dark ground, each page one JPEG at the cards' 3x, A4 wide. Each
+// design is attached as its .shipcard (an embedded file, in the order shown), and the folder's name is the title,
+// so importPdf can take it back as a folder.
+const PDF_COLUMNS = 3, PDF_ROWS = 6, PDF_GAP = 4, PDF_WIDTH = 595;   // (gap in card px; width in pt)
+const safeFileName = (n) => n.replace(/[\\/:*?"<>|]/g, '_').trim() || '_';
+/** The cards ({ ship, url }) as a PDF download. */
+async function exportGallery(name, items) {
+  const cw = CARD.width, ch = CARD.height, gap = PDF_GAP, pad = gap * 2, k = CARD_SCALE;
+  const w = pad * 2 + PDF_COLUMNS * cw + (PDF_COLUMNS - 1) * gap, h = pad * 2 + PDF_ROWS * ch + (PDF_ROWS - 1) * gap;
+  const c = newCanvas(w * k, h * k), g = c.getContext('2d');
+  const pages = [], perPage = PDF_COLUMNS * PDF_ROWS;
+  for (let first = 0; first < items.length; first += perPage) {
+    g.fillStyle = '#0b203d';   // (the CSS --panel-2)
+    g.fillRect(0, 0, c.width, c.height);
+    for (const [i, { url }] of items.slice(first, first + perPage).entries()) {
+      const img = await createImageBitmap(await (await fetch(url)).blob());
+      const x = pad + (i % PDF_COLUMNS) * (cw + gap), y = pad + Math.floor(i / PDF_COLUMNS) * (ch + gap);
+      g.drawImage(img, x * k, y * k, cw * k, ch * k);
+      img.close();
+    }
+    const jpeg = await new Promise((ok) => c.toBlob(ok, 'image/jpeg', 0.9));
+    pages.push({ jpeg: new Uint8Array(await jpeg.arrayBuffer()), w: c.width, h: c.height });
+  }
+  const files = [], taken = new Set();
+  for (const { ship } of items) {
+    const file = freeName(safeFileName(ship.name), taken);
+    taken.add(file);
+    files.push({ name: `${file}.shipcard`, bytes: await encodeDesign(await designOf(ship)) });
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(pdf(pages, PDF_WIDTH, (PDF_WIDTH * h) / w, { title: name, files }));
+  a.download = `${safeFileName(name)} gallery.pdf`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+/** UTF-16BE hex string (a PDF text string), and back. */
+const pdfText = (t) => `<FEFF${Array.from({ length: t.length }, (_, i) => t.charCodeAt(i).toString(16).padStart(4, '0')).join('')}>`;
+const fromPdfText = (hex) => String.fromCharCode(...(hex.match(/.{4}/g) ?? []).map((h) => parseInt(h, 16)));
+/**
+ * A PDF of `pages` ({ jpeg bytes, w, h in px }), each filling a pw x ph pt page; with a title and attached files
+ * ({ name, bytes }, in order).
+ */
+function pdf(pages, pw, ph, { title = '', files = [] } = {}) {
+  const enc = new TextEncoder(), chunks = [], offsets = [];
+  let size = 0;
+  const put = (x) => { const b = typeof x === 'string' ? enc.encode(x) : x; chunks.push(b); size += b.length; };
+  const obj = (n, ...body) => { offsets[n] = size; put(`${n} 0 obj\n`); for (const b of body) put(b); put('\nendobj\n'); };
+  const W = pw.toFixed(2), H = ph.toFixed(2);
+  // 1 catalog, 2 page tree, 3 info, then 3 per page (page, contents, image), then 2 per file (spec, file).
+  const pageId = (i) => 4 + 3 * i, fileId = (i) => 4 + 3 * pages.length + 2 * i;
+  put('%PDF-1.7\n%\xe2\xe3\xcf\xd3\n');
+  const names = files.map((f, i) => `(${String(i).padStart(6, '0')}) ${fileId(i)} 0 R`).join(' ');
+  obj(1, `<< /Type /Catalog /Pages 2 0 R${files.length ? ` /Names << /EmbeddedFiles << /Names [${names}] >> >>` : ''} >>`);
+  obj(2, `<< /Type /Pages /Count ${pages.length} /Kids [${pages.map((_, i) => `${pageId(i)} 0 R`).join(' ')}] >>`);
+  obj(3, `<< /Title ${pdfText(title)} /Producer (Khiva Shipworks) >>`);
+  pages.forEach((p, i) => {
+    const n = pageId(i), draw = `q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
+    obj(n, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Im0 ${n + 2} 0 R >> >> /Contents ${n + 1} 0 R >>`);
+    obj(n + 1, `<< /Length ${draw.length} >>\nstream\n${draw}\nendstream`);
+    obj(n + 2, `<< /Type /XObject /Subtype /Image /Width ${p.w} /Height ${p.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${p.jpeg.length} >>\nstream\n`, p.jpeg, '\nendstream');
+  });
+  files.forEach((f, i) => {
+    const n = fileId(i), ascii = f.name.replace(/[^\x20-\x7e]|[()\\]/g, '_');
+    obj(n, `<< /Type /Filespec /F (${ascii}) /UF ${pdfText(f.name)} /EF << /F ${n + 1} 0 R >> >>`);
+    obj(n + 1, `<< /Type /EmbeddedFile /Subtype /application#2Foctet-stream /Length ${f.bytes.length} >>\nstream\n`, f.bytes, '\nendstream');
+  });
+  const xref = size, count = offsets.length;
+  put(`xref\n0 ${count}\n0000000000 65535 f \n${offsets.slice(1).map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`);
+  put(`trailer\n<< /Size ${count} /Root 1 0 R /Info 3 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  return new Blob(chunks, { type: 'application/pdf' });
+}
+const isPdf = (b) => b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46;   // %PDF
+/**
+ * A gallery PDF's designs (its attached .shipcards; see pdf()) saved as a new folder, named by its title. Reads
+ * the PDFs Export writes, not any PDF's attachments (no compressed object streams and such).
+ */
+async function importPdf(fileName, bytes) {
+  const text = new TextDecoder('latin1').decode(bytes);   // (one char per byte: indices are offsets)
+  const name = fromPdfText(text.match(/\/Title\s*<FEFF([0-9A-Fa-f]*)>/)?.[1] ?? '') || fileName.replace(/\.pdf$/i, '').replace(/ gallery$/, '');
+  const stream = (n) => {
+    const at = text.search(new RegExp(`(^|\\s)${n}\\s+0\\s+obj\\b`));
+    if (at < 0) return null;
+    const head = text.slice(at, at + 400).match(/\/Length\s+(\d+)[^]*?stream\r?\n/);
+    if (!head) return null;
+    const start = at + head.index + head[0].length;
+    return bytes.slice(start, start + Number(head[1]));
+  };
+  const designs = [], failed = [];
+  for (const [, uf, n] of text.matchAll(/\/Type\s*\/Filespec\b[^]*?\/UF\s*<FEFF([0-9A-Fa-f]*)>[^]*?\/EF\s*<<\s*\/F\s+(\d+)\s+0\s+R/g)) {
+    const file = fromPdfText(uf);
+    if (!/\.shipcard$/i.test(file)) continue;
+    try {
+      const shipcard = stream(n);
+      if (!shipcard) throw new Error('missing');
+      const m = await decodeDesign(shipcard);
+      designs.push({ name: m.name?.trim() || file.replace(/\.shipcard$/i, ''), parts: m.parts.length, flagship: m.flagship, saved: Date.now(), shipcard });
+    } catch { failed.push(file); }
+  }
+  if (!designs.length) return toast(failed.length ? `Couldn't read the designs in ${fileName}.` : `${fileName} has no designs attached (only the gallery's own PDFs do).`);
+  return importDesigns(name, designs, failed);
+}
+
 const below = (el) => { const r = el.getBoundingClientRect(); return { x: r.left, y: r.bottom + 4 }; };
 /** After a change: the menus again, with `folder` (or the one that was open) opened. */
 function refreshShipList(folder) {
@@ -1637,12 +2176,30 @@ function refreshShipList(folder) {
   openShipList(folder ?? menus.load[0].querySelector('.item.open .label')?.textContent);
 }
 loadButton.onclick = () => (menus.load.length ? closeAllMenus() : openShipList());
+// The Gallery menu: the folders; one opens its gallery.
+const galleryButton = $('gallery-button');
+let galleryMenu = null;
+galleryButton.onclick = async () => {
+  const wasOpen = galleryMenu && menus.context[0] === galleryMenu;
+  closeAllMenus();
+  galleryMenu = null;
+  if (wasOpen) return;
+  let folders;
+  try { folders = await shipFolders(); } catch (err) {
+    galleryMenu = showMenu('context', 0, [{ empty: `Saved ships are unavailable: ${err.message}.` }], below(galleryButton));
+    return;
+  }
+  galleryMenu = showMenu('context', 0, folders.map((f) => ({ label: f.name, meta: `${f.ships.length}`, onClick: () => openGallery(f) })),
+    below(galleryButton));
+};
 document.addEventListener('pointerdown', (e) => {
+  if (dialog.contains(e.target) || gallery.contains(e.target)) return;   // the menus stay open under a dialog opened from them
+  if (galleryButton.contains(e.target)) return;   // it toggles its own menu
   if (!inMenus(e.target) && !loadButton.contains(e.target)) closeAllMenus();
   else if (menus.context.length && !menus.context.some((m) => m.contains(e.target))) closeMenus('context');
 }, { capture: true });
 window.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape' || !(menus.load.length || menus.context.length)) return;
+  if (e.key !== 'Escape' || dialog.open || !(menus.load.length || menus.context.length)) return;
   e.stopImmediatePropagation();
   closeMenus(menus.context.length ? 'context' : 'load');
 }, { capture: true });
@@ -1650,10 +2207,10 @@ window.addEventListener('resize', closeAllMenus);
 openShips().catch(() => {});   // the examples are ready by the time the list is opened
 
 
-$('download').onclick = () => {
+$('download').onclick = async () => {
   const { ship, loose } = connected();
   const v = ship.validate();
-  if (!v.ok && !confirm(`This design breaks some rules:\n\n${v.messages.join('\n')}\n\nDownload anyway?`)) return;
+  if (!v.ok && !await ask(`This design breaks some rules:\n\n${v.messages.join('\n')}\n\nDownload anyway?`, { ok: 'Download anyway' })) return;
   const blob = new Blob([ship.toSeria()], { type: 'application/octet-stream' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1662,13 +2219,13 @@ $('download').onclick = () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   if (loose) toast(`Left out ${loose} unconnected part${loose > 1 ? 's' : ''}.`);
 };
-// One button flips between the looks; it names the one showing.
+// One button flips between the looks; it names the one it switches to.
 const modeButton = $('mode');
 function showMode() {
-  modeButton.textContent = colour ? '◐ Color' : '▦ Blueprint';
+  modeButton.textContent = colour ? 'Blueprint' : 'Render';
   modeButton.title = colour
-    ? "The game's look: its sprites with lighting, shadows and colors. Click for the blueprint"
-    : 'The blueprint: hand-drawn parts on graph paper. Click for the game\'s colors';
+    ? 'Show the blueprint: hand-drawn parts on graph paper'
+    : "Show the game's look: its sprites with lighting, shadows and colors";
 }
 modeButton.disabled = !(contrastBlueprint || blueprint);
 modeButton.onclick = () => {
@@ -1702,9 +2259,27 @@ document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) stage.clas
 document.addEventListener('drop', async (e) => {
   e.preventDefault();
   stage.classList.remove('dragover');
+  // Folders are saved as folders of designs; the entries have to be taken before anything is awaited.
+  const dirs = [...e.dataTransfer.items].map((i) => i.webkitGetAsEntry?.()).filter((d) => d?.isDirectory);
+  if (dirs.length) {
+    for (const d of dirs) await importFolder(d.name, await filesIn(d));
+    return;
+  }
   const f = e.dataTransfer.files[0];
   if (f) open(await f.arrayBuffer(), f.name);
 });
+/** The files in a dropped folder, and its subfolders'. */
+async function filesIn(dir) {
+  const reader = dir.createReader(), out = [];
+  // readEntries gives them a batch at a time, then an empty one.
+  for (let batch; (batch = await new Promise((ok, err) => reader.readEntries(ok, err))).length;) {
+    for (const en of batch) {
+      if (en.isDirectory) out.push(...await filesIn(en));
+      else out.push(await new Promise((ok, err) => en.file(ok, err)));
+    }
+  }
+  return out;
+}
 
 // For poking at the page from the console (and the UI smoke test).
 window.shipbuilder = {

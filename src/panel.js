@@ -12,13 +12,13 @@ const pct = (part, total) => (total ? i((part / total) * 100) : 0);
 
 /**
  * The panel as data: { rows: [{ label, value, red }] } (label '' = blank spacer row). Power, ammo, crew and evac
- * pods read "have [NEED n] [p%]".
+ * pods read "have/need (p%)".
  */
 export function statLines(s) {
   const rows = [];
   const row = (label, value, red = false) => rows.push({ label, value, red });
-  /** "have [NEED n] [p%]" (p: have over need). */
-  const need = (have, needed, unit = '') => `${i(have)}${unit} [NEED ${i(needed)}${unit}] [${needed ? i((have / needed) * 100) : 100}%]`;
+  /** "have/need (p%)" (p: have over need). */
+  const need = (have, needed, unit = '') => `${i(have)}/${i(needed)}${unit} (${needed ? i((have / needed) * 100) : 100}%)`;
   const canFly = s.twr >= 1;
   row('THRUST/WEIGHT', canFly ? s.twr.toFixed(1) : 'LOW THRUST!', !canFly);
   row('CRUISE SPEED', canFly ? `${i(s.speedKmh)} km/h` : 'LOW THRUST!', !canFly);
@@ -54,7 +54,7 @@ export function statLines(s) {
   if (s.elint) row('ELINT', `${i(s.elintKm)} km`);
   if (s.irst) row('IRST', `${i(s.irst)} km`);
   if (s.jammer) row('JAMMER', `${i(s.jammer)} km`);
-  if (s.crewNeed) row('CREW', need(s.crewCapacity, s.crewNeed), s.crewNeed > s.crewCapacity);
+  row('CREW', need(s.crewCapacity, s.crewNeed), s.crewNeed > s.crewCapacity);
   if (s.crewCapacity) row('EVAC PODS', need(s.evacPods, s.evacPodsNeed), s.evacPods < s.evacPodsNeed);
   // Not in the game's panel.
   row('FSS', `${s.extinguishers}`);

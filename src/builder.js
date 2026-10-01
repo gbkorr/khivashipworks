@@ -325,6 +325,12 @@ export function snapOffset(allParts, group, primary, dx, dy, bases) {
     }
   }
   if (best) return [dx + best[0], dy + best[1]];
+  // A leg off the hull puts its top (mount) slot where a hull block's leg slot would be: on a grid point.
+  if (primary.joint === 'leg') {
+    const m = moved.slots().find((s) => s.mount);
+    const line = (v) => Math.round(v / GRID) * GRID;
+    return [dx + line(m.x) - m.x, dy + line(m.y) - m.y];
+  }
   // No slot nearby. Structure that attaches by an edge slot (antenna, radars, bombs) puts that slot where
   // a block's edge slot would be: the middle of the cell edge it faces, as when attached.
   const edge = !primary.mounted && moved.slots()[0];
@@ -344,6 +350,65 @@ export function snapOffset(allParts, group, primary, dx, dy, bases) {
     return Math.round((v - off) / GRID) * GRID + off;
   };
   return [dx + snap(cx, b.x1 - b.x0) - cx, dy + snap(cy, b.y1 - b.y0) - cy];
+}
+
+// How finely each part may be turned on its own: 4-, 8- or 24-way. Parts not listed keep their template
+// angle (a turned group carries them round but resets their own rotation).
+const ROTATION_WAYS = Object.fromEntries([
+  ...['1X1_04', '2X1_01', '2X2_04', '2X2_02', '2X2_03'].flatMap((s) => [`MDL_FERMA${s}`, `MDL_HARD${s}`]),
+  'MDL_ARMOR2X1_01', 'MDL_ARMOR1X1_01', 'MDL_ARMOR1X1_02', 'MDL_ARMOR1X1_03', 'MDL_ARMOR1X1_04',
+  'MDL_ENGINE_05', 'MDL_ENGINE_02',
+  'MDL_NUKE_01_CONV', 'MDL_NUKE_02_CONV', 'MDL_NUKE_03_CONV', 'MDL_NUKE_04_CONV',
+  'MDL_NUKE_01', 'MDL_NUKE_02', 'MDL_NUKE_03', 'MDL_NUKE_04',
+  'MDL_MISSILE_03', 'MDL_EVAC', 'MDL_FSS_02', 'MDL_BOMB_01', 'MDL_MISSILE_01', 'MDL_MISSILE_02',
+  'MDL_FUEL_01', 'MDL_GENERATOR_02', 'MDL_QUARTERS_02', 'MDL_AMMO', 'MDL_GENERATOR_01',
+  'MDL_ANTENNA_01', 'MDL_RADAR_01', 'MDL_RADAR_02', 'MDL_FCR_01', 'MDL_FCR_02', 'MDL_SPO_01', 'MDL_SPO_02',
+  'MDL_IRST_01', 'MDL_JAMMER_01',
+  'MDL_MISSILE_CLUSTER_SFW_01',
+].map((oid) => [oid, 4]).concat(
+  ['MDL_KAZ', 'MDL_FLARES', 'MDL_TORPEDO_300'].map((oid) => [oid, 8]),
+  ['MDL_LEG_01', 'MDL_LEG_02', 'MDL_LEG_03', 'MDL_LEG_04'].map((oid) => [oid, 24]),
+));
+
+/** The angle one turn of this part steps by, or 0 if it doesn't turn on its own. */
+export function rotationStep(oid) {
+  const n = ROTATION_WAYS[oid];
+  return n ? 2 * Math.PI / n : 0;
+}
+
+/** The angle a part has before it's turned (the aircraft's templates are turned a quarter). */
+export const restAngle = (oid) => normAngle(PART_TEMPLATES[oid]?.m_angle ?? 0);
+
+/** Turn one part by `dir` of its own steps (clockwise for dir > 0); false if it doesn't turn. */
+export function turnPart(p, dir) {
+  if (p.joint === 'leg') return turnLegs([p], [p], dir);
+  const step = rotationStep(p.oid);
+  if (!step) return false;
+  p.angle = normAngle(Math.round((p.angle + dir * step) / step) * step) || 0;   // no -0
+  return true;
+}
+
+/**
+ * Turn a group of legs by `dir` leg steps (clockwise for dir > 0): each chain pivots on its top leg's mount
+ * slot, carrying the legs hung off it. False unless every part is a leg.
+ */
+export function turnLegs(allParts, group, dir) {
+  if (!group.length || !group.every((p) => p.joint === 'leg')) return false;
+  const inGroup = new Set(group);
+  const { host } = computeLinks(allParts);
+  for (const top of group.filter((p) => !inGroup.has(host.get(p)))) {
+    const step = rotationStep(top.oid);
+    const da = Math.round((top.angle + dir * step) / step) * step - top.angle;
+    const mount = top.slots().find((s) => s.mount);
+    const chain = dependents(allParts, [top]).filter((p) => inGroup.has(p));
+    for (const p of chain) {
+      const [rx, ry] = rot(p.x - mount.x, p.y - mount.y, da);
+      p.x = mount.x + rx; p.y = mount.y + ry;
+      const a = p.angle + da, k = Math.round(a / step);
+      p.angle = normAngle(Math.abs(a - k * step) < 1e-9 ? k * step : a) || 0;   // no float noise, no -0
+    }
+  }
+  return true;
 }
 
 /** Turn parts 90 degrees clockwise (on screen, y down) about (cx, cy). */

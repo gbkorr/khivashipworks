@@ -323,19 +323,18 @@ function specks(v, gain, darkGain = gain) {
   return out;
 }
 
-const BLOT_EDGE = 2, BLOT_EDGE_MAX = 0.2;   // blotch edge steepness, and the level it saturates towards
-
 /**
  * Paper texture layers for drawGraphPaper's `texture`, as RGBA pixel tiles (put each in a canvas; see
  * paperTexture). Each is laid out in metres so it zooms and pans with the grid:
- *   grain:    fine speckle and a few pale fibres (12 texels per metre, 512 texels = ~43 m tile)
- *   blotches: soft uneven lighter / darker patches 16-128 m across (1 texel per metre, 256 m tile)
+ *   grain:     fine speckle and a few pale fibres (12 texels per metre, 512 texels = ~43 m tile)
+ *   formation: fine, uneven fibre clumping, as paper looks held to the light: lighter / darker flecks
+ *              2-8 m across over a faint 32 m cloud (4 texels per metre, 512 texels = 128 m tile)
  * @param opts { seed (default 1), strength (overall alpha, default 1) }
  * @returns [{ name, size, perMetre, pixels }]
  */
 export function paperLayers(opts = {}) {
   const seed = opts.seed ?? 1, strength = opts.strength ?? 1;
-  const G = 512, B = 256;
+  const G = 512, F = 512;
   const grain = new Float32Array(G * G);
   for (let y = 0; y < G; y++) {
     for (let x = 0; x < G; x++) {
@@ -354,18 +353,16 @@ export function paperLayers(opts = {}) {
       grain[k] += lift * Math.sin((Math.PI * i) / len);
     }
   }
-  const blot = new Float32Array(B * B);
-  for (let y = 0; y < B; y++) {
-    for (let x = 0; x < B; x++) {
-      blot[y * B + x] = tileNoise(x, y, 128, B, seed + 11) * 0.55 + tileNoise(x, y, 64, B, seed + 12) * 0.3
-        + tileNoise(x, y, 32, B, seed + 13) * 0.2 + tileNoise(x, y, 16, B, seed + 14) * 0.1;
-      // A tanh curve steepens the ramp through zero and levels the patches off, so they get a firmer edge.
-      blot[y * B + x] = BLOT_EDGE_MAX * Math.tanh((blot[y * B + x] / BLOT_EDGE_MAX) * BLOT_EDGE);
+  const form = new Float32Array(F * F);
+  for (let y = 0; y < F; y++) {
+    for (let x = 0; x < F; x++) {
+      form[y * F + x] = tileNoise(x, y, 32, F, seed + 11) * 0.5 + tileNoise(x, y, 16, F, seed + 12) * 0.35
+        + tileNoise(x, y, 8, F, seed + 13) * 0.2 + tileNoise(x, y, 128, F, seed + 14) * 0.35;
     }
   }
   return [
-    // Dark patches go deeper than light ones lift, for more contrast against the ship's fills.
-    { name: 'blotches', size: B, perMetre: 1, pixels: specks(blot, 0.3 * strength, 0.5 * strength) },
+    // Dark flecks go a little deeper than light ones lift, for more contrast against the ship's fills.
+    { name: 'formation', size: F, perMetre: 4, pixels: specks(form, 0.13 * strength, 0.16 * strength) },
     { name: 'grain', size: G, perMetre: 12, pixels: specks(grain, 0.22 * strength) },
   ];
 }

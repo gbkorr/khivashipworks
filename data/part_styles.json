@@ -53,8 +53,37 @@
       "size": 0.85
     },
     "oversized": {
-      "modules": ["MDL_AMMO", "MDL_AMMO_02", "MDL_ENGINE_01", "MDL_FERMA2X2_01", "MDL_FERMA4X4_01"],
+      "modules": ["MDL_AMMO", "MDL_AMMO_02", "MDL_ENGINE_01", "MDL_FERMA2X2_01", "MDL_FERMA4X4_01", "MDL_JAMMER_01"],
       "size": 0.8
+    },
+    "trimmed": {
+      "modules": [
+        "MDL_COMBRIDGE_01", "MDL_QUARTERS_01", "MDL_FERMA2X2_02", "MDL_FERMA2X2_03", "MDL_FERMA2X2_04",
+        "MDL_HARD2X2_02", "MDL_HARD2X2_03", "MDL_HARD2X2_04", "MDL_KAZ", "MDL_FLARES"
+      ],
+      "size": 0.9
+    },
+    "engines": {
+      "modules": ["MDL_ENGINE_02", "MDL_ENGINE_03", "MDL_ENGINE_04", "MDL_ENGINE_05"],
+      "size": 0.7
+    },
+    "large missiles": {
+      "modules": [
+        "MDL_NUKE_01_CONV", "MDL_NUKE_02_CONV", "MDL_NUKE_03_CONV", "MDL_NUKE_04_CONV",
+        "MDL_NUKE_01", "MDL_NUKE_02", "MDL_NUKE_03", "MDL_NUKE_04"
+      ],
+      "size": 0.9
+    },
+    "back": {
+      "modules": [
+        "MDL_FERMA1X1_01", "MDL_FERMA1X1_04", "MDL_FERMA2X1_01", "MDL_FERMA2X2_01", "MDL_FERMA2X2_02", "MDL_FERMA2X2_03",
+        "MDL_FERMA2X2_04", "MDL_FERMA4X4_01", "MDL_COMBRIDGE_01",
+        "MDL_HARD1X1_01", "MDL_HARD1X1_04", "MDL_HARD2X1_01", "MDL_HARD2X2_01", "MDL_HARD2X2_02", "MDL_HARD2X2_03",
+        "MDL_HARD2X2_04",
+        "MDL_ARMOR1X1_01", "MDL_ARMOR1X1_02", "MDL_ARMOR1X1_03", "MDL_ARMOR1X1_04", "MDL_ARMOR2X1_01",
+        "MDL_LEG_01", "MDL_LEG_02", "MDL_LEG_03", "MDL_LEG_04", "MDL_WHEEL_01"
+      ],
+      "back": true
     }
   }
 }
