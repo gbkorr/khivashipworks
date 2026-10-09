@@ -1,6 +1,6 @@
 This is a webapp that replicates the shipbuilder in [Highfleet](https://store.steampowered.com/app/1434950/HighFleet/) with several QoL changes and new features. The .serias it produces are usable ingame; the original goal was to give myself a way to design ships for the game on my laptop.
 
-<writeup coming soon> with images of all the features.
+\<writeup coming soon\> with images of all the features.
 
 Coded entirely by Opus 5.5; QA, UI design, and feature choices by me. This took a lot of polish and iteration.
 
