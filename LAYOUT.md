@@ -7,7 +7,7 @@ app/              the page
   assets.js         loads the images (sprite atlases, UI sprites, font sheets) and makes the paper texture
   edit.js           the design: undo, changes, picking parts up, carrying, dropping, turning, deleting
   view.js           drawing the stage (blueprint or shaded colour), overlays, the camera
-  panels.js         stat card, stats and parts list, drawn when the input is idle; header name and flagship
+  panels.js         the stat card (drawn when the input is idle), stats and parts list; header name and flagship
   input.js          mouse and keyboard on the stage
   mobile.js         touch gestures and the phone/tablet layout
   tray.js           the parts library
@@ -30,7 +30,7 @@ lib/              ship model, rules, stats and rendering (no DOM besides canvase
   shading.js        the game's lighting, cast shadows and colour grade
   paper.js          the stage's graph paper: the blueprint, or the light theme's
   partstyles.js     per-module drawing tweaks (data/part_styles.json)
-  font.js           the game's bitmap fonts
+  font.js           the game's bitmap fonts (the stat card's text)
   panel.js          the stats panel's lines
   parts.js          the parts list
   statcard.js       the stat card

@@ -4,7 +4,7 @@
   --sheet: #184a85; --panel: #0e2849; --panel-2: #0b203d; --edge: #04101f;
   --ink: #ecf4ff; --ink-dim: #ecf4ff99; --line: #ecf4ff2b; --hover: #ecf4ff14;
   --warn: #ff9d8f; --gold: #ffd76a;
-  --rule: #ecf4ff17; --margin-rule: #ff9d8f70;   /* the parts list's ruled paper (RULED.line, RULED.margin) */
+  --rule: #ecf4ff17; --margin-rule: #ff9d8f70;   /* the parts list's ruled paper */
   --grain: none; --formation: none;   /* paper texture tiles, set by app.js */
   --field: #00000024; --pressed: #2a3445; --scroll: #ecf4ff40;   /* text fields; a lit stage tool; scrollbars */
   --gold-wash: #ffd76a22;   /* behind the flagship star */
@@ -140,15 +140,27 @@ aside .empty { padding: 0 14px; color: var(--ink-dim); width: 30ch; }
 #card-section { padding: 8px 0 6px; border-bottom: 1px solid var(--line); }
 #card-section.collapsed { display: none; }
 #card-panel { width: 394px; height: 249px; margin: 0 auto; cursor: pointer; filter: drop-shadow(0 2px 4px #00000055); }   /* CARD.width; drawn at 3x (CARD_SCALE) */
-/* The stats as label / value rows (statLines), in the parts list's game font; drawn by app.js. */
-#stats-panel { margin: 10px 0; }
-/* Right side: the parts list, on ruled paper: 26px lines (RULED.line) and the margin rule (RULED.margin). */
+/* The stats as label / value rows (statLines, filled in by app/panels.js); values bold, warning rows in coral. */
+#stats-panel {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 16px;
+  width: 394px; margin: 10px 0; padding: 0 14px; line-height: 21px; white-space: pre;   /* the card's width */
+}
+#stats-panel .gap { grid-column: 1 / -1; height: 21px; }
+#stats-panel .val { font-weight: bold; }
+#stats-panel .red { color: var(--warn); }
+/* Right side: the parts list on ruled paper, a 26px line per row; the icons hang left of the margin rule. */
 #parts-ruled {
-  width: 280px; flex: 1 0 auto;   /* PARTS_W in app.js */
+  width: 280px; flex: 1 0 auto;   /* the longest line (NUCLEAR MISSILE CARRIER) and a little room */
   background:
     linear-gradient(to right, transparent 48px, var(--margin-rule) 48px 49px, transparent 49px),
     repeating-linear-gradient(to bottom, transparent 0 25px, var(--rule) 25px 26px);
 }
+#parts-panel > div { height: 26px; }
+#parts-panel .title { line-height: 26px; padding-left: 54px; color: var(--warn); }
+#parts-panel .item { display: grid; grid-template-columns: 44px 34px minmax(0, 1fr); align-items: center; }
+#parts-panel .item canvas { grid-column: 1; justify-self: end; }   /* its right edge 4px left of the margin rule */
+#parts-panel .item .count { grid-column: 2; text-align: right; }
+#parts-panel .item .name { grid-column: 3; margin: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #parts-ruled .empty { padding: 5px 0 0 54px; width: auto; }
 
 /* ---- the stage's overlays ---- */
@@ -360,7 +372,7 @@ html.mobile #side-stats.collapsed > .fold-bar { border-left: none; border-radius
 html.mobile #side-parts.collapsed > .fold-bar { border-right: none; border-radius: 0 0 0 6px; }
 html.mobile #card-bar { min-height: 40px; font-size: 14px; }
 html.mobile #card-panel { width: min(394px, calc(100vw - 52px)); height: auto; }
-html.mobile #stats-panel { max-width: calc(100vw - 52px); height: auto !important; }
+html.mobile #stats-panel { max-width: calc(100vw - 52px); }
 
 /* The stage's overlays: shortcuts and the look clear of the sidebar tabs; the toolbar bottom right, toasts above it. */
 html.mobile #help { left: 48px; top: 8px; bottom: auto; }

@@ -1,8 +1,7 @@
 // The side panels: the stat card and the stats (left), the parts list (right), drawn when the input is idle; the
 // foldable sections; the name and flagship controls.
-import { drawText, measureText } from '../lib/font.js';
 import { statLines } from '../lib/panel.js';
-import { RULED, partsList, renderRuledList, ruledListLines } from '../lib/parts.js';
+import { partsList, rowIcon, ruledRows } from '../lib/parts.js';
 import { SHADING, bakeShadedAsync } from '../lib/shading.js';
 import { encodeDesign } from '../lib/sharecode.js';
 import { CARD, renderStatCard, statCardLines } from '../lib/statcard.js';
@@ -10,46 +9,34 @@ import { S, $, canvas, carrying, hotkeyHint } from './state.js';
 import { atlas, fonts, ui } from './assets.js';
 import { bakeKey, bakes, refreshStill } from './view.js';
 
-// The parts list's width: its longest line (NUCLEAR MISSILE CARRIER) and a little room (#parts-ruled's width).
-const PARTS_W = 280;
-const STATS_W = 394, STATS_PAD = 14, STATS_LINE = 21, STATS_FONT = 'dinpro_14_reg';   // the card's width
-
-/**
- * The page's ink and coral (the CSS --ink and --warn), which the light paper changes; there the ink darkens the
- * role icons too.
- */
-function inks() {
-  const css = getComputedStyle(document.documentElement), ink = css.getPropertyValue('--ink').trim();
-  return { ink, accent: css.getPropertyValue('--warn').trim(), roles: S.light ? ink : null };
-}
+const span = (text, className = '') => Object.assign(document.createElement('span'), { textContent: text, className });
 
 export function drawSidePanels(ship, stats) {
-  // Stats as label / value rows, in the ruled list's font; warnings in coral.
-  const colors = inks();
-  const rows = statLines(stats).rows, sk = window.devicePixelRatio || 1;
-  const valueX = STATS_PAD + Math.max(...rows.map((r) => measureText(STATS_FONT, r.label))) + 16;
-  const sp = $('stats-panel'), sh = rows.length * STATS_LINE;
-  sp.width = STATS_W * sk; sp.height = sh * sk;
-  sp.style.width = `${STATS_W}px`; sp.style.height = `${sh}px`;
-  const sg = sp.getContext('2d');
-  sg.scale(sk, sk);
-  rows.forEach((r, i) => {
-    const c = r.red ? colors.accent : colors.ink, y = i * STATS_LINE + 1;
-    if (r.label) for (const [t, x] of [[r.label, STATS_PAD], [r.value, valueX]]) drawText(sg, STATS_FONT, t, x, y, c, { fonts });
-  });
+  // Stats as label / value rows of plain text; style.css lays out the columns, sets the values in bold and inks the
+  // warnings coral, so a theme change recolours them by itself.
+  $('stats-panel').replaceChildren(...statLines(stats).rows.flatMap((r) => (r.label
+    ? [span(r.label, r.red ? 'red' : ''), span(r.value, r.red ? 'val red' : 'val')]
+    : span('', 'gap'))));
 
-  // Ruled list; the rules themselves are the side panel's CSS background, so they carry on below it.
-  const sections = partsList(ship);
-  const h = ruledListLines(stats, sections) * RULED.line;
-  const p = $('parts-panel'), k = window.devicePixelRatio || 1;
-  p.width = PARTS_W * k; p.height = Math.max(1, h * k);
-  p.style.width = `${PARTS_W}px`; p.style.height = `${h}px`;
-  p.hidden = !h;
-  const g = p.getContext('2d');
-  g.scale(k, k);
-  // Headers in the page's coral.
-  renderRuledList(g, { ui, fonts, stats, sections, width: PARTS_W, colors });
-  p.nextElementSibling.textContent = h ? '' : 'No weapons, sensors or engines yet.';
+  // The ruled list, a row of text per line; the rules themselves are #parts-ruled's CSS background, so they carry
+  // on below it. On light paper the white role icons are darkened to the page's ink.
+  const rows = ruledRows(stats, partsList(ship));
+  const tint = S.light ? getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() : null;
+  const p = $('parts-panel');
+  p.replaceChildren(...rows.map((r) => {
+    const row = document.createElement('div');
+    if (r.title) {
+      row.className = 'title';
+      row.textContent = r.title;
+    } else {
+      row.className = 'item';
+      const icon = rowIcon(r, ui, tint);
+      row.append(...icon ? [icon] : [], span(r.count, 'count'), span(r.name, 'name'));
+    }
+    return row;
+  }));
+  p.hidden = !rows.length;
+  p.nextElementSibling.textContent = rows.length ? '' : 'No weapons, sensors or engines yet.';
 
   cardWanted = true;
   whenIdle();
